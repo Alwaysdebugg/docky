@@ -39,13 +39,26 @@ export const COMMANDS: CommandSpec[] = [
   { name: "use", usage: "/use <项目>", desc: "切换当前项目(作用域)", args: true },
   { name: "projects", usage: "/projects", desc: "列出已注册项目", args: false },
   { name: "whoami", usage: "/whoami", desc: "显示当前目录解析到的项目/分支", args: false },
-  { name: "list", usage: "/list [类型]", desc: "列出当前项目文档(可按类型)", args: false },
-  { name: "search", usage: "/search <关键词>", desc: "在当前项目内全文检索", args: true },
+  { name: "list", usage: "/list [类型] [--status S] [#标签] [--stale]", desc: "列出文档(可按类型/状态/标签过滤)", args: false },
+  { name: "search", usage: "/search <关键词>", desc: "在当前项目内全文检索(可选中跳转)", args: true },
+  { name: "o", usage: "/o [关键词]", desc: "模糊快速打开文档(Ctrl-P)", args: false },
   { name: "open", usage: "/open <相对路径>", desc: "查看文档内容,如 design/x.md", args: true },
+  { name: "recent", usage: "/recent", desc: "最近打开 / 置顶文档(可选中打开)", args: false },
+  { name: "pin", usage: "/pin <相对路径>", desc: "置顶文档到主页", args: true },
+  { name: "unpin", usage: "/unpin <相对路径>", desc: "取消置顶", args: true },
+  { name: "status", usage: "/status <相对路径> <状态>", desc: "设置生命周期: draft/active/done/archived", args: true },
+  { name: "new", usage: "/new <类型> [名]", desc: "用模板新建文档(草稿)", args: true },
+  { name: "import", usage: "/import [目录] [#标签]", desc: "交互式导入三筛", args: false },
   { name: "add", usage: "/add <类型> <路径> [名]", desc: "归档一个 md 到当前项目", args: true },
   { name: "index", usage: "/index", desc: "刷新当前项目 INDEX.md", args: false },
+  { name: "sync", usage: "/sync", desc: "提交 vault 未提交改动", args: false },
+  { name: "log", usage: "/log <相对路径>", desc: "查看文档演进历史", args: true },
+  { name: "diff", usage: "/diff <相对路径> [revA] [revB]", desc: "查看文档差异(分页器)", args: true },
   { name: "mv", usage: "/mv <相对路径> <类型>", desc: "移动文档到另一类型", args: true },
-  { name: "rm", usage: "/rm <相对路径>", desc: "删除文档", args: true },
+  { name: "rm", usage: "/rm <相对路径> [--yes]", desc: "删除文档(移入回收站,需确认)", args: true },
+  { name: "undo", usage: "/undo", desc: "撤销最近一次删除/移动/覆盖", args: false },
+  { name: "trash", usage: "/trash", desc: "查看回收站", args: false },
+  { name: "restore", usage: "/restore <回收站名>", desc: "从回收站还原", args: true },
   { name: "link", usage: "/link", desc: "为当前项目建立 symlink(+.gitignore)", args: false },
   { name: "unlink", usage: "/unlink", desc: "移除当前项目的 symlink", args: false },
   { name: "clear", usage: "/clear", desc: "清屏", args: false },
@@ -55,6 +68,44 @@ export const COMMANDS: CommandSpec[] = [
 const ALIASES: Record<string, string> = { q: "exit", quit: "exit", p: "use", "?": "help", register: "init" };
 
 const TYPES_HINT = DOC_TYPES.join(" / ");
+
+export interface ListFilter {
+  type?: string;
+  status?: string;
+  tag?: string;
+  stale: boolean;
+}
+
+/** Parse `/list` arguments: `[type] [--status S] [#tag] [--stale]`. Shared by
+ *  the TUI browser, executeCommand, and the CLI so filters behave identically. */
+export function parseListArgs(args: string[]): ListFilter {
+  const f: ListFilter = { stale: false };
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--stale") f.stale = true;
+    else if (a === "--status" || a === "-s") {
+      const s = args[++i];
+      if (s) f.status = s.toLowerCase();
+    } else if (a.startsWith("#") && a.length > 1) f.tag = a.slice(1);
+    else if (!f.type && (DOC_TYPES as readonly string[]).includes(a)) f.type = a;
+  }
+  return f;
+}
+
+/** One display line for a doc in `/list`, with ⚠ stale, status badge, and tags. */
+export function formatDocLine(d: {
+  type: string;
+  title: string;
+  name: string;
+  status: string;
+  tags: string[];
+  stale: boolean;
+}): string {
+  const mark = d.stale ? "⚠ " : "";
+  const badge = d.status !== "active" ? `[${d.status}] ` : "";
+  const tags = d.tags.length ? "  " + d.tags.map((t) => `#${t}`).join(" ") : "";
+  return `  ${mark}${d.type.padEnd(12)} ${badge}${d.title}  (${d.name})${tags}`;
+}
 
 function line(text: string, level: Level = "out"): OutLine {
   return { text, level };
@@ -124,19 +175,31 @@ export function executeCommand(vault: string, project: string | null, raw: strin
         return { output: out, project: args[0] };
       }
       case "whoami": {
-        const ctx = core.resolveProject(vault, process.cwd());
-        out.push(line(`project: ${ctx.project}`, "ok"));
-        out.push(line(`branch:  ${ctx.branch ?? "-"}`));
-        out.push(line(`matched: ${ctx.root}`));
-        return { output: out, project: ctx.project };
+        try {
+          const ctx = core.resolveProject(vault, process.cwd());
+          out.push(line(`project: ${ctx.project}`, "ok"));
+          out.push(line(`branch:  ${ctx.branch ?? "-"}`));
+          out.push(line(`matched: ${ctx.root}`));
+          return { output: out, project: ctx.project };
+        } catch {
+          const name = core.inferRepoName(process.cwd());
+          out.push(line("当前目录未注册到 docky。", "err"));
+          out.push(line(`  → 运行 /init 注册为 ${name}(或 docky register ${name})`, "info"));
+          return { output: out };
+        }
       }
       case "list": {
         const proj = needProject(project);
-        const type = args[0];
-        const docs = core.listDocs(vault, proj, type);
+        const f = parseListArgs(args);
+        const docs = core.filterDocs(core.listDocs(vault, proj, f.type), {
+          status: f.status,
+          tag: f.tag,
+          stale: f.stale,
+        });
         if (docs.length === 0) out.push(line("(无文档)", "info"));
-        for (const d of docs) out.push(line(`  ${d.type.padEnd(12)} ${d.title}  (${d.name})`));
-        out.push(line(`${docs.length} 篇`, "ok"));
+        for (const d of docs) out.push(line(formatDocLine(d)));
+        const staleN = docs.filter((d) => d.stale).length;
+        out.push(line(`${docs.length} 篇${staleN ? ` · ⚠ ${staleN} 可能陈旧` : ""}`, "ok"));
         return { output: out };
       }
       case "search": {
@@ -156,17 +219,73 @@ export function executeCommand(vault: string, project: string | null, raw: strin
         const proj = needProject(project);
         if (!args[0]) throw new DockyError("用法: /open <相对路径>");
         const content = core.readDoc(vault, proj, args[0]);
+        core.recordOpen(vault, proj, args[0]);
         for (const l of content.split("\n")) out.push(line(l));
+        return { output: out };
+      }
+      case "recent": {
+        const proj = needProject(project);
+        const pins = core.getPins(vault, proj);
+        const recents = core.getRecents(vault, proj);
+        if (pins.length === 0 && recents.length === 0) {
+          out.push(line("(暂无最近/置顶)", "info"));
+          return { output: out };
+        }
+        if (pins.length) {
+          out.push(line("📌 置顶", "info"));
+          for (const r of pins) out.push(line(`  ${r}`));
+        }
+        if (recents.length) {
+          out.push(line("🕘 最近", "info"));
+          for (const r of recents) out.push(line(`  ${r}`));
+        }
+        return { output: out };
+      }
+      case "pin": {
+        const proj = needProject(project);
+        if (!args[0]) throw new DockyError("用法: /pin <相对路径>");
+        core.pin(vault, proj, args[0]);
+        out.push(line(`已置顶 ${args[0]}`, "ok"));
+        return { output: out };
+      }
+      case "unpin": {
+        const proj = needProject(project);
+        if (!args[0]) throw new DockyError("用法: /unpin <相对路径>");
+        core.unpin(vault, proj, args[0]);
+        out.push(line(`已取消置顶 ${args[0]}`, "ok"));
+        return { output: out };
+      }
+      case "status": {
+        const proj = needProject(project);
+        if (args.length < 2) {
+          throw new DockyError("用法: /status <相对路径> <draft|active|done|archived>");
+        }
+        core.setStatus(vault, proj, args[0], args[1]);
+        out.push(line(`已设为 ${args[1].toLowerCase()} — ${args[0]}`, "ok"));
+        return { output: out };
+      }
+      case "new": {
+        const proj = needProject(project);
+        if (!args[0]) throw new DockyError("用法: /new <类型> [名]");
+        const name = args.slice(1).join(" ") || undefined;
+        const dest = core.scaffold(vault, proj, args[0], name);
+        const rel = dest.split(/[\\/]/).slice(-2).join("/");
+        core.recordOpen(vault, proj, rel);
+        out.push(line(`已创建草稿 ${rel}(status: draft)`, "ok"));
         return { output: out };
       }
       case "add": {
         const proj = needProject(project);
-        if (args.length < 2) throw new DockyError("用法: /add <类型> <路径> [新名]");
+        const force = args.includes("--force");
+        const a = args.filter((x) => x !== "--force");
+        if (a.length < 2) throw new DockyError("用法: /add <类型> <路径> [新名] [--force]");
         const branch = core.gitBranch(process.cwd());
-        const dest = core.addDoc(vault, proj, args[0], args[1], {
+        const dest = core.addDoc(vault, proj, a[0], a[1], {
           branch,
           withFrontmatter: true,
-          newName: args[2],
+          newName: a[2],
+          failIfExists: true,
+          force,
         });
         out.push(line(`已归档 ${path.basename(path.dirname(dest))}/${path.basename(dest)}`, "ok"));
         return { output: out };
@@ -177,18 +296,62 @@ export function executeCommand(vault: string, project: string | null, raw: strin
         out.push(line(`已刷新 ${path.basename(p)}`, "ok"));
         return { output: out };
       }
+      case "sync": {
+        const r = core.syncVault(vault);
+        if (r.committed) out.push(line(`已提交 ${r.changes} 处改动`, "ok"));
+        else out.push(line("没有需要提交的改动", "info"));
+        return { output: out };
+      }
+      case "log": {
+        const proj = needProject(project);
+        if (!args[0]) throw new DockyError("用法: /log <相对路径>");
+        const commits = core.logDoc(vault, proj, args[0]);
+        if (commits.length === 0) out.push(line("(无提交历史)", "info"));
+        for (const c of commits) out.push(line(`  ${c.hash}  ${c.date}  ${c.subject}`));
+        return { output: out };
+      }
+      case "diff": {
+        const proj = needProject(project);
+        if (!args[0]) throw new DockyError("用法: /diff <相对路径> [revA] [revB]");
+        const diff = core.diffDoc(vault, proj, args[0], args[1], args[2]);
+        if (!diff.trim()) out.push(line("(无差异)", "info"));
+        for (const l of diff.split("\n")) out.push(line(l));
+        return { output: out };
+      }
       case "mv": {
         const proj = needProject(project);
-        if (args.length < 2) throw new DockyError("用法: /mv <相对路径> <目标类型>");
-        const dest = core.moveDoc(vault, proj, args[0], args[1]);
+        const force = args.includes("--force");
+        const a = args.filter((x) => x !== "--force");
+        if (a.length < 2) throw new DockyError("用法: /mv <相对路径> <目标类型> [--force]");
+        const dest = core.moveDoc(vault, proj, a[0], a[1], undefined, { force });
         out.push(line(`已移动到 ${path.basename(path.dirname(dest))}/${path.basename(dest)}`, "ok"));
         return { output: out };
       }
       case "rm": {
         const proj = needProject(project);
-        if (!args[0]) throw new DockyError("用法: /rm <相对路径>");
+        if (!args[0]) throw new DockyError("用法: /rm <相对路径> [--yes]");
         core.removeDoc(vault, proj, args[0]);
-        out.push(line(`已删除 ${args[0]}`, "ok"));
+        out.push(line(`已移入回收站 ${args[0]}(可 /undo 或 /restore)`, "ok"));
+        return { output: out };
+      }
+      case "undo": {
+        const proj = needProject(project);
+        const desc = core.undo(vault, proj);
+        out.push(line(`已撤销:${desc}`, "ok"));
+        return { output: out };
+      }
+      case "trash": {
+        const proj = needProject(project);
+        const entries = core.listTrash(vault, proj);
+        if (entries.length === 0) out.push(line("(回收站为空)", "info"));
+        for (const e of entries) out.push(line(`  ${e.name}  →  ${e.rel}`));
+        return { output: out };
+      }
+      case "restore": {
+        const proj = needProject(project);
+        if (!args[0]) throw new DockyError("用法: /restore <回收站名>");
+        const rel = core.restoreDoc(vault, proj, args[0]);
+        out.push(line(`已还原 ${rel}`, "ok"));
         return { output: out };
       }
       case "link": {

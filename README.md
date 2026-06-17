@@ -52,6 +52,7 @@ docky index                      # 刷新 INDEX.md
 | `docky init [--no-git]` | 初始化中心仓库 |
 | `docky register <名> [--path P] [--link]` | 注册项目并登记本地路径 |
 | `docky add <类型> <文件...> [-p 项目] [-f] [--name N]` | 归档文档 |
+| `docky import [目录] [-p 项目] [--apply] [--move]` | 扫描散落 .md 并按启发式归类(默认 dry-run 预览,`--apply` 执行) |
 | `docky list [类型] [-p 项目]` | 列出文档 |
 | `docky open <相对路径> [-p 项目] [--raw]` | 渲染后用分页器查看文档(`--raw` 输出原始 md) |
 | `docky search <关键词> [-p 项目] [-t 类型]` | 作用域内检索 |
@@ -84,7 +85,7 @@ docky
 | `/init [项目名] [路径]` | 把当前仓库登记为项目(默认用仓库名)并切换;`/register` 为别名 |
 | `/projects` | 进入项目选择器(↑/↓ 选择,Enter 切换到该项目,Esc/q 返回) |
 | `/use <项目>` / `/whoami` | 直接切换 / 识别当前项目 |
-| `/list [类型]` | 层级文档浏览器:左侧按类型分组列出文件,右侧**实时预览**;↑/↓ 选择,Enter 终端内全屏查看,`e` 用编辑器打开,Esc/q 返回 |
+| `/list [类型]` | 层级文档浏览器:按类型分组列出文件;↑/↓ 选择,Enter 终端内渲染预览,`e` 编辑器打开,Esc/q 返回 |
 | `/search <关键词>` | 作用域内全文检索 |
 | `/open <相对路径>` | 渲染 md 并在同终端分页器中查看(按 q 返回 docky) |
 | `/add <类型> <路径> [名]` | 归档 md |
@@ -125,6 +126,18 @@ MCP 客户端配置:
 | `search_docs(project, query, type?)` | 作用域内关键词检索 |
 | `write_doc(project, type, name, content)` | 写入文档 |
 
+## 存量文档接管(import)
+
+把老项目里散落的 .md 一键归类进 docky,默认 **dry-run** 预览,确认后再执行:
+
+```bash
+docky import                 # 扫描当前目录,打印"文件 → 类型(置信/理由)"对照表
+docky import --apply         # 确认后复制进 vault
+docky import --move          # 移动(接管原文件)
+```
+
+归类启发式(按可靠性):①frontmatter `type:`(高)→ ②目录名匹配(高,如 `design/`、`debug/`)→ ③文件名关键词(中,如 `login-bug.md`)→ 命中不了则标"未分类"(不导入)。自动跳过 README/CHANGELOG 等常规文档与 `node_modules` 等目录。
+
 ## Claude Code 集成(hooks)
 
 让 agent 默认走 docky 读写过程文档,一条命令安装护栏(无需手写脚本或 jq):
@@ -163,4 +176,6 @@ npm run dev -- list    # 用 tsx 直接跑源码
 ## 路线图
 
 - [x] TUI(Ink):Claude-Code 式单框 REPL + 斜杠命令菜单,裸 `docky` 启动
-- [ ] `docky import`:存量 md 批量接管(扫描/分类/移动/gitignore)
+- [x] `docky import`:存量 md 批量接管(启发式归类 + dry-run)
+- [x] Claude Code hooks 集成(`docky hooks install`)
+- [ ] 语义检索(embedding);跨项目授权访问

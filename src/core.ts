@@ -5,10 +5,13 @@ import yaml from "js-yaml";
 import matter from "gray-matter";
 import {
   Config,
+  DOC_STATUSES,
   DOC_TYPES,
   DocInfo,
+  DocStatus,
   DockyError,
   ProjectContext,
+  ScopeDetection,
   SearchHit,
 } from "./types.js";
 import {
@@ -18,6 +21,7 @@ import {
   loadConfig,
   saveConfig,
 } from "./config.js";
+import { loadTemplate, renderTemplate, writeDefaultTemplates } from "./templates.js";
 
 // --------------------------------------------------------------------------- //
 // Git helpers
@@ -40,6 +44,91 @@ export function gitBranch(cwd: string): string | null {
   if (b) return b;
   const b2 = git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
   return b2 && b2 !== "HEAD" ? b2 : null;
+}
+
+// --------------------------------------------------------------------------- //
+// Vault versioning (F08)
+// --------------------------------------------------------------------------- //
+function isGitRepo(vault: string): boolean {
+  return fs.existsSync(path.join(vault, ".git"));
+}
+
+/** Count uncommitted changes in the vault (0 when it isn't a git repo). */
+export function uncommittedCount(vault: string): number {
+  if (!isGitRepo(vault)) return 0;
+  const out = git(vault, ["status", "--porcelain"]);
+  return out ? out.split("\n").filter((l) => l.trim()).length : 0;
+}
+
+/** Commit all pending vault changes. Returns false if it isn't a repo or there
+ *  is nothing to commit. Inline identity keeps it working without global git
+ *  config; failures degrade silently (git() already swallows errors). */
+export function commitVault(vault: string, message: string): boolean {
+  if (!isGitRepo(vault)) return false;
+  if (uncommittedCount(vault) === 0) return false;
+  git(vault, ["add", "-A"]);
+  const res = git(vault, [
+    "-c",
+    "user.name=docky",
+    "-c",
+    "user.email=docky@local",
+    "commit",
+    "-m",
+    message,
+  ]);
+  return res !== null;
+}
+
+/** Auto-commit hook invoked by write operations — fires only in "auto" mode. */
+export function autoCommitVault(vault: string, message: string): void {
+  if (loadConfig(vault).autocommit === "auto") commitVault(vault, message);
+}
+
+export interface DocCommit {
+  hash: string;
+  date: string;
+  subject: string;
+}
+
+/** Commit history for one document (scope-checked path). */
+export function logDoc(vault: string, project: string, rel: string): DocCommit[] {
+  const abs = safePath(vault, project, rel);
+  if (!isGitRepo(vault)) return [];
+  const out = git(vault, [
+    "log",
+    "--format=%h%x09%ad%x09%s",
+    "--date=short",
+    "--",
+    path.relative(vault, abs),
+  ]);
+  if (!out) return [];
+  return out
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => {
+      const [hash, date, ...rest] = l.split("\t");
+      return { hash, date, subject: rest.join("\t") };
+    });
+}
+
+/** Unified diff for a document, optionally between revisions (scope-checked). */
+export function diffDoc(vault: string, project: string, rel: string, revA?: string, revB?: string): string {
+  const abs = safePath(vault, project, rel);
+  if (!isGitRepo(vault)) return "";
+  const args = ["diff"];
+  if (revA && revB) args.push(revA, revB);
+  else if (revA) args.push(revA);
+  args.push("--", path.relative(vault, abs));
+  return git(vault, args) ?? "";
+}
+
+/** Commit pending changes (manual sync); optionally push to a configured remote. */
+export function syncVault(vault: string, push = false): { changes: number; committed: boolean; pushed: boolean } {
+  const changes = uncommittedCount(vault);
+  const committed = commitVault(vault, "sync: 手动同步");
+  let pushed = false;
+  if (push && isGitRepo(vault)) pushed = git(vault, ["push"]) !== null;
+  return { changes, committed, pushed };
 }
 
 // --------------------------------------------------------------------------- //
@@ -67,9 +156,15 @@ export function initVault(vault: string, useGit = true): string {
       "utf-8"
     );
   }
+  writeDefaultTemplates(vault); // F06: seed per-type scaffolding templates
   if (useGit && !fs.existsSync(path.join(vault, ".git"))) {
     git(vault, ["init", "-q"]);
-    fs.writeFileSync(path.join(vault, ".gitignore"), "", "utf-8");
+    // Keep per-project state, trash, and oplog out of version control (F08/F10).
+    fs.writeFileSync(
+      path.join(vault, ".gitignore"),
+      "**/.docky-state.json\n**/.docky-oplog.json\n**/.trash/\n",
+      "utf-8"
+    );
   }
   return vault;
 }
@@ -131,6 +226,28 @@ export function listProjects(vault: string): Config["projects"] {
   return loadConfig(vault).projects;
 }
 
+/** Best-guess project name for a directory: git repo name, else dir basename. */
+export function inferRepoName(cwd: string): string {
+  const root = gitRoot(cwd);
+  return path.basename(root ?? path.resolve(cwd));
+}
+
+/**
+ * Classify how a working directory maps to docky, so callers can offer a
+ * one-key fix instead of a dead-end error (F05). Never falls back to a global
+ * scope — an unregistered dir stays unregistered, just with a suggested name.
+ */
+export function detectScope(vault: string, cwd: string): ScopeDetection {
+  if (!isInitialized(vault)) return { kind: "no-vault" };
+  try {
+    return { kind: "registered", project: resolveProject(vault, cwd).project };
+  } catch {
+    const root = gitRoot(cwd);
+    if (root) return { kind: "unregistered-repo", suggestedName: path.basename(root), root };
+    return { kind: "no-repo", suggestedName: path.basename(path.resolve(cwd)) };
+  }
+}
+
 // --------------------------------------------------------------------------- //
 // Scope-safe path helpers
 // --------------------------------------------------------------------------- //
@@ -181,7 +298,8 @@ export function buildFrontmatter(
   project: string,
   docType: string,
   title: string,
-  branch: string | null
+  branch: string | null,
+  extra: { tags?: string[]; status?: string } = {}
 ): string {
   const meta: Record<string, unknown> = {
     project,
@@ -189,6 +307,8 @@ export function buildFrontmatter(
     title,
     created: new Date().toISOString().slice(0, 10),
   };
+  if (extra.status) meta.status = extra.status;
+  if (extra.tags && extra.tags.length) meta.tags = extra.tags;
   if (branch) meta.branch = branch;
   const body = yaml.dump(meta, { sortKeys: false }).trim();
   return `---\n${body}\n---\n`;
@@ -197,35 +317,221 @@ export function buildFrontmatter(
 // --------------------------------------------------------------------------- //
 // Document operations
 // --------------------------------------------------------------------------- //
-function titleOf(filePath: string): string {
+interface DocMeta {
+  title: string;
+  status: DocStatus;
+  tags: string[];
+}
+
+/** Coerce a frontmatter `status` value to a known lifecycle state. */
+function normalizeStatus(v: unknown): DocStatus {
+  const s = String(v ?? "").toLowerCase();
+  return (DOC_STATUSES as readonly string[]).includes(s) ? (s as DocStatus) : "active";
+}
+
+/** Coerce a frontmatter `tags` value (array or comma/space string) to a clean list. */
+function normalizeTags(v: unknown): string[] {
+  const raw = Array.isArray(v) ? v.map((x) => String(x)) : typeof v === "string" ? v.split(/[,\s]+/) : [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const t of raw) {
+    const clean = t.replace(/^#/, "").trim();
+    if (clean && !seen.has(clean)) {
+      seen.add(clean);
+      out.push(clean);
+    }
+  }
+  return out;
+}
+
+/** Read title (frontmatter → first heading → filename) + status + tags in one pass. */
+function readDocMeta(filePath: string): DocMeta {
   let text: string;
   try {
     text = fs.readFileSync(filePath, "utf-8");
   } catch {
-    return path.basename(filePath, ".md");
+    return { title: path.basename(filePath, ".md"), status: "active", tags: [] };
   }
   const fm = parseFrontmatter(text);
-  if (fm.title) return String(fm.title);
-  for (const line of text.split("\n")) {
-    if (line.startsWith("# ")) return line.slice(2).trim();
+  let title = fm.title ? String(fm.title) : "";
+  if (!title) {
+    for (const line of text.split("\n")) {
+      if (line.startsWith("# ")) {
+        title = line.slice(2).trim();
+        break;
+      }
+    }
   }
-  return path.basename(filePath, ".md");
+  if (!title) title = path.basename(filePath, ".md");
+  return { title, status: normalizeStatus(fm.status), tags: normalizeTags(fm.tags) };
+}
+
+function safeMtimeMs(filePath: string): number {
+  try {
+    return fs.statSync(filePath).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
+/** A doc is "stale" when an active design/plan has not changed in staleDays. */
+function computeStale(type: string, status: DocStatus, mtime: number, staleDays: number, now: number): boolean {
+  if (status !== "active") return false;
+  if (type !== "design" && type !== "plan") return false;
+  return now - mtime > staleDays * 86_400_000;
 }
 
 export function listDocs(vault: string, project: string, docType?: string): DocInfo[] {
   const types = docType ? [validateType(docType)] : [...DOC_TYPES];
   const out: DocInfo[] = [];
   const base = projectDir(vault, project);
+  const staleDays = loadConfig(vault).staleDays ?? 30;
+  const now = Date.now();
   for (const t of types) {
     const d = path.join(base, t);
     if (!fs.existsSync(d) || !fs.statSync(d).isDirectory()) continue;
     const files = fs.readdirSync(d).filter((f) => f.endsWith(".md")).sort();
     for (const f of files) {
       const full = path.join(d, f);
-      out.push({ project, type: t, name: f, rel: `${t}/${f}`, title: titleOf(full), path: full });
+      const meta = readDocMeta(full);
+      const mtime = safeMtimeMs(full);
+      out.push({
+        project,
+        type: t,
+        name: f,
+        rel: `${t}/${f}`,
+        title: meta.title,
+        path: full,
+        status: meta.status,
+        tags: meta.tags,
+        mtime,
+        stale: computeStale(t, meta.status, mtime, staleDays, now),
+      });
     }
   }
   return out;
+}
+
+export interface DocFilter {
+  status?: string;
+  tag?: string;
+  stale?: boolean;
+  /** Include archived docs (hidden by default unless status==="archived"). */
+  includeArchived?: boolean;
+}
+
+/** Apply F03 organization filters. Archived docs are hidden unless explicitly
+ *  requested (via includeArchived or status==="archived"). */
+export function filterDocs(docs: DocInfo[], f: DocFilter = {}): DocInfo[] {
+  const wantStatus = f.status ? f.status.toLowerCase() : undefined;
+  const wantTag = f.tag ? f.tag.replace(/^#/, "") : undefined;
+  return docs.filter((d) => {
+    if (!f.includeArchived && wantStatus !== "archived" && d.status === "archived") return false;
+    if (wantStatus && d.status !== wantStatus) return false;
+    if (wantTag && !d.tags.includes(wantTag)) return false;
+    if (f.stale && !d.stale) return false;
+    return true;
+  });
+}
+
+/** Set a document's lifecycle status by rewriting its frontmatter in place,
+ *  preserving the body. Adds frontmatter if the doc had none. */
+export function setStatus(
+  vault: string,
+  project: string,
+  rel: string,
+  status: string,
+  opts: { noCommit?: boolean } = {}
+): string {
+  const s = status.toLowerCase();
+  if (!(DOC_STATUSES as readonly string[]).includes(s)) {
+    throw new DockyError(`Invalid status '${status}'. Allowed: ${DOC_STATUSES.join(", ")}`);
+  }
+  const p = safePath(vault, project, rel);
+  if (!fs.existsSync(p) || !fs.statSync(p).isFile()) {
+    throw new DockyError(`Document not found: ${rel}`);
+  }
+  const parsed = matter(fs.readFileSync(p, "utf-8"));
+  const data = { ...(parsed.data as Record<string, unknown>), status: s };
+  fs.writeFileSync(p, matter.stringify(parsed.content, data), "utf-8");
+  if (!opts.noCommit) autoCommitVault(vault, `status(${rel}): ${s}`);
+  return p;
+}
+
+/** Merge tags into a document's frontmatter (deduped), preserving the body. */
+export function addTags(
+  vault: string,
+  project: string,
+  rel: string,
+  tags: string[],
+  opts: { noCommit?: boolean } = {}
+): string {
+  const p = safePath(vault, project, rel);
+  if (!fs.existsSync(p) || !fs.statSync(p).isFile()) {
+    throw new DockyError(`Document not found: ${rel}`);
+  }
+  const parsed = matter(fs.readFileSync(p, "utf-8"));
+  const merged = normalizeTags((parsed.data as Record<string, unknown>).tags);
+  for (const t of normalizeTags(tags)) if (!merged.includes(t)) merged.push(t);
+  const data = { ...(parsed.data as Record<string, unknown>), tags: merged };
+  fs.writeFileSync(p, matter.stringify(parsed.content, data), "utf-8");
+  if (!opts.noCommit) autoCommitVault(vault, `tag(${rel}): ${merged.join(",")}`);
+  return p;
+}
+
+// --------------------------------------------------------------------------- //
+// Batch operations (F11) — each runs over a selection as a single commit
+// --------------------------------------------------------------------------- //
+export interface BatchResult {
+  ok: string[];
+  errors: { rel: string; error: string }[];
+}
+
+function batchEach(rels: string[], fn: (rel: string) => void): BatchResult {
+  const ok: string[] = [];
+  const errors: { rel: string; error: string }[] = [];
+  for (const rel of rels) {
+    try {
+      fn(rel);
+      ok.push(rel);
+    } catch (e) {
+      errors.push({ rel, error: (e as Error).message });
+    }
+  }
+  return { ok, errors };
+}
+
+export function batchRemove(vault: string, project: string, rels: string[]): BatchResult {
+  const r = batchEach(rels, (rel) => removeDoc(vault, project, rel, { noCommit: true }));
+  if (r.ok.length) autoCommitVault(vault, `batch rm: ${r.ok.length} 篇`);
+  return r;
+}
+
+export function batchMove(
+  vault: string,
+  project: string,
+  rels: string[],
+  destType: string,
+  opts: { force?: boolean } = {}
+): BatchResult {
+  validateType(destType);
+  const r = batchEach(rels, (rel) => {
+    moveDoc(vault, project, rel, destType, undefined, { force: opts.force, noCommit: true });
+  });
+  if (r.ok.length) autoCommitVault(vault, `batch mv → ${destType}: ${r.ok.length} 篇`);
+  return r;
+}
+
+export function batchSetStatus(vault: string, project: string, rels: string[], status: string): BatchResult {
+  const r = batchEach(rels, (rel) => setStatus(vault, project, rel, status, { noCommit: true }));
+  if (r.ok.length) autoCommitVault(vault, `batch status ${status.toLowerCase()}: ${r.ok.length} 篇`);
+  return r;
+}
+
+export function batchAddTags(vault: string, project: string, rels: string[], tags: string[]): BatchResult {
+  const r = batchEach(rels, (rel) => addTags(vault, project, rel, tags, { noCommit: true }));
+  if (r.ok.length) autoCommitVault(vault, `batch tag: ${r.ok.length} 篇`);
+  return r;
 }
 
 export function addDoc(
@@ -233,7 +539,18 @@ export function addDoc(
   project: string,
   docType: string,
   src: string,
-  opts: { branch?: string | null; withFrontmatter?: boolean; newName?: string } = {}
+  opts: {
+    branch?: string | null;
+    withFrontmatter?: boolean;
+    newName?: string;
+    noCommit?: boolean;
+    tags?: string[];
+    status?: string;
+    /** Refuse to overwrite an existing target unless force is set (F10). */
+    failIfExists?: boolean;
+    /** Overwrite an existing target, backing the old content up to .trash (F10). */
+    force?: boolean;
+  } = {}
 ): string {
   validateType(docType);
   ensureProjectDirs(vault, project);
@@ -243,13 +560,26 @@ export function addDoc(
   }
   let name = opts.newName ?? path.basename(src);
   if (!name.endsWith(".md")) name += ".md";
-  const dest = safePath(vault, project, `${docType}/${name}`);
+  const rel = `${docType}/${name}`;
+  const dest = safePath(vault, project, rel);
+  const exists = fs.existsSync(dest);
+  if (exists && opts.failIfExists && !opts.force) {
+    throw new DockyError(`${rel} 已存在。--force 覆盖,或换个 --name。`);
+  }
   let text = fs.readFileSync(src, "utf-8");
   if (opts.withFrontmatter && Object.keys(parseFrontmatter(text)).length === 0) {
-    const title = titleOf(src);
-    text = buildFrontmatter(project, docType, title, opts.branch ?? null) + "\n" + text;
+    const title = readDocMeta(src).title;
+    text =
+      buildFrontmatter(project, docType, title, opts.branch ?? null, {
+        tags: opts.tags,
+        status: opts.status,
+      }) +
+      "\n" +
+      text;
   }
+  if (exists && opts.force) backupOverwrite(vault, project, rel); // recoverable via undo
   fs.writeFileSync(dest, text, "utf-8");
+  if (!opts.noCommit) autoCommitVault(vault, `add(${docType}): ${path.basename(dest)}`);
   return dest;
 }
 
@@ -259,7 +589,30 @@ export function writeDoc(vault: string, project: string, docType: string, name: 
   if (!name.endsWith(".md")) name += ".md";
   const dest = safePath(vault, project, `${docType}/${name}`);
   fs.writeFileSync(dest, content, "utf-8");
+  autoCommitVault(vault, `write(${docType}): ${path.basename(dest)}`);
   return dest;
+}
+
+function today(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+/** Render a type's template (user override → built-in) for a given title (F06). */
+export function renderScaffold(vault: string, docType: string, title: string): string {
+  validateType(docType);
+  return renderTemplate(loadTemplate(vault, docType), { title, date: today() });
+}
+
+/**
+ * Create a new document from its type template (F06). When `name` is omitted, a
+ * date-stamped name is generated. Returns the absolute path of the new file.
+ */
+export function scaffold(vault: string, project: string, docType: string, name?: string): string {
+  validateType(docType);
+  const base = (name && name.trim()) || `${docType}-${today()}`;
+  const title = base.replace(/\.md$/i, "");
+  const content = renderScaffold(vault, docType, title);
+  return writeDoc(vault, project, docType, base, content);
 }
 
 export function readDoc(vault: string, project: string, rel: string): string {
@@ -270,12 +623,22 @@ export function readDoc(vault: string, project: string, rel: string): string {
   return fs.readFileSync(p, "utf-8");
 }
 
-export function removeDoc(vault: string, project: string, rel: string): void {
+/** Soft-delete: move the doc into the project's `.trash/` (recoverable via
+ *  restoreDoc / undo) rather than unlinking it outright (F10). */
+export function removeDoc(
+  vault: string,
+  project: string,
+  rel: string,
+  opts: { noCommit?: boolean } = {}
+): void {
   const p = safePath(vault, project, rel);
   if (!fs.existsSync(p) || !fs.statSync(p).isFile()) {
     throw new DockyError(`Document not found: ${rel}`);
   }
-  fs.unlinkSync(p);
+  const trash = moveToTrash(vault, project, rel);
+  logOp(vault, project, { op: "rm", rel, trash, ts: Date.now() });
+  forgetRel(vault, project, rel); // drop from recents/pins
+  if (!opts.noCommit) autoCommitVault(vault, `rm: ${rel}`);
 }
 
 export function moveDoc(
@@ -283,7 +646,8 @@ export function moveDoc(
   project: string,
   rel: string,
   destType: string,
-  newName?: string
+  newName?: string,
+  opts: { force?: boolean; noCommit?: boolean } = {}
 ): string {
   validateType(destType);
   const src = safePath(vault, project, rel);
@@ -292,16 +656,160 @@ export function moveDoc(
   }
   let name = newName ?? path.basename(src);
   if (!name.endsWith(".md")) name += ".md";
-  const dest = safePath(vault, project, `${destType}/${name}`);
+  const destRel = `${destType}/${name}`;
+  const dest = safePath(vault, project, destRel);
+  if (fs.existsSync(dest)) {
+    if (!opts.force) throw new DockyError(`${destRel} 已存在。--force 覆盖,或改名。`);
+    backupOverwrite(vault, project, destRel); // recoverable via undo
+  }
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.renameSync(src, dest);
+  forgetRel(vault, project, rel); // the old location is now stale
+  logOp(vault, project, { op: "mv", from: rel, to: `${destType}/${path.basename(dest)}`, ts: Date.now() });
+  if (!opts.noCommit) autoCommitVault(vault, `mv: ${rel} → ${destType}/${path.basename(dest)}`);
   return dest;
 }
 
-export function searchDocs(vault: string, project: string, query: string, docType?: string): SearchHit[] {
+// --------------------------------------------------------------------------- //
+// Trash, oplog & undo (F10)
+// --------------------------------------------------------------------------- //
+const OPLOG_FILE = ".docky-oplog.json";
+const OPLOG_MAX = 50;
+
+type OpEntry =
+  | { op: "rm"; rel: string; trash: string; ts: number }
+  | { op: "mv"; from: string; to: string; ts: number }
+  | { op: "overwrite"; rel: string; trash: string; ts: number };
+
+function loadOplog(vault: string, project: string): OpEntry[] {
+  try {
+    const data = JSON.parse(fs.readFileSync(safePath(vault, project, OPLOG_FILE), "utf-8"));
+    return Array.isArray(data) ? (data as OpEntry[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveOplog(vault: string, project: string, ops: OpEntry[]): void {
+  fs.writeFileSync(safePath(vault, project, OPLOG_FILE), JSON.stringify(ops.slice(-OPLOG_MAX), null, 2), "utf-8");
+}
+
+function logOp(vault: string, project: string, entry: OpEntry): void {
+  const ops = loadOplog(vault, project);
+  ops.push(entry);
+  saveOplog(vault, project, ops);
+}
+
+/** Move a doc into the project's `.trash/` (timestamped, reversible). Returns
+ *  the trash-relative path. The original rel is URI-encoded into the name. */
+function moveToTrash(vault: string, project: string, rel: string): string {
+  const trashRel = `.trash/${Date.now()}__${encodeURIComponent(rel)}`;
+  const dest = safePath(vault, project, trashRel);
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.renameSync(safePath(vault, project, rel), dest);
+  return trashRel;
+}
+
+/** Back up the doc currently at `rel` to trash and log it, so a forced
+ *  overwrite can be undone (F10). */
+function backupOverwrite(vault: string, project: string, rel: string): void {
+  const trash = moveToTrash(vault, project, rel);
+  logOp(vault, project, { op: "overwrite", rel, trash, ts: Date.now() });
+}
+
+function decodeTrashName(name: string): { rel: string; deletedAt: number } | null {
+  const idx = name.indexOf("__");
+  if (idx < 0) return null;
+  let rel: string;
+  try {
+    rel = decodeURIComponent(name.slice(idx + 2));
+  } catch {
+    rel = name.slice(idx + 2);
+  }
+  return { rel, deletedAt: Number(name.slice(0, idx)) || 0 };
+}
+
+export interface TrashEntry {
+  name: string;
+  rel: string;
+  deletedAt: number;
+}
+
+/** List the project's recoverable trash entries, newest first. */
+export function listTrash(vault: string, project: string): TrashEntry[] {
+  const dir = safePath(vault, project, ".trash");
+  if (!fs.existsSync(dir)) return [];
+  const out: TrashEntry[] = [];
+  for (const name of fs.readdirSync(dir)) {
+    const d = decodeTrashName(name);
+    if (d) out.push({ name, rel: d.rel, deletedAt: d.deletedAt });
+  }
+  return out.sort((a, b) => b.deletedAt - a.deletedAt);
+}
+
+/** Restore a trashed doc back to its original location (scope-checked). */
+export function restoreDoc(vault: string, project: string, name: string): string {
+  const src = safePath(vault, project, `.trash/${name}`);
+  if (!fs.existsSync(src)) throw new DockyError(`回收站中没有: ${name}`);
+  const decoded = decodeTrashName(name);
+  if (!decoded) throw new DockyError(`无法解析回收站条目: ${name}`);
+  const dest = safePath(vault, project, decoded.rel);
+  if (fs.existsSync(dest)) throw new DockyError(`目标已存在,无法还原: ${decoded.rel}`);
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.renameSync(src, dest);
+  autoCommitVault(vault, `restore: ${decoded.rel}`);
+  return decoded.rel;
+}
+
+/** Reverse the most recent write op (rm / mv / forced overwrite). Returns a
+ *  human description, or throws if there is nothing to undo (F10). */
+export function undo(vault: string, project: string): string {
+  const ops = loadOplog(vault, project);
+  const last = ops.pop();
+  if (!last) throw new DockyError("没有可撤销的操作");
+  let desc: string;
+  if (last.op === "rm") {
+    const trash = safePath(vault, project, last.trash);
+    const dest = safePath(vault, project, last.rel);
+    if (fs.existsSync(trash) && !fs.existsSync(dest)) {
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.renameSync(trash, dest);
+    }
+    desc = `rm(${last.rel}) —— 已从 .trash 还原`;
+    autoCommitVault(vault, `undo rm: ${last.rel}`);
+  } else if (last.op === "mv") {
+    const to = safePath(vault, project, last.to);
+    const from = safePath(vault, project, last.from);
+    if (fs.existsSync(to)) {
+      fs.mkdirSync(path.dirname(from), { recursive: true });
+      fs.renameSync(to, from);
+    }
+    desc = `mv(${last.from} → ${last.to}) —— 已回退`;
+    autoCommitVault(vault, `undo mv: ${last.to} → ${last.from}`);
+  } else {
+    const trash = safePath(vault, project, last.trash);
+    const dest = safePath(vault, project, last.rel);
+    if (fs.existsSync(trash)) {
+      if (fs.existsSync(dest)) fs.unlinkSync(dest);
+      fs.renameSync(trash, dest);
+    }
+    desc = `overwrite(${last.rel}) —— 已恢复旧内容`;
+    autoCommitVault(vault, `undo overwrite: ${last.rel}`);
+  }
+  saveOplog(vault, project, ops);
+  return desc;
+}
+
+export function searchDocs(
+  vault: string,
+  project: string,
+  query: string,
+  docType?: string,
+  filter: DocFilter = {}
+): SearchHit[] {
   const q = query.toLowerCase();
   const hits: SearchHit[] = [];
-  for (const doc of listDocs(vault, project, docType)) {
+  for (const doc of filterDocs(listDocs(vault, project, docType), filter)) {
     let lines: string[];
     try {
       lines = fs.readFileSync(doc.path, "utf-8").split("\n");
@@ -322,21 +830,303 @@ export function searchDocs(vault: string, project: string, query: string, docTyp
 }
 
 // --------------------------------------------------------------------------- //
+// Per-project state: recents & pins (F04)
+// --------------------------------------------------------------------------- //
+// Stored at projects/<project>/.docky-state.json — still inside the project
+// scope, so it is covered by the same safePath isolation. Never throws on a
+// missing/corrupt file: it just resets, so recency tracking can't crash docky.
+const STATE_FILE = ".docky-state.json";
+const RECENTS_MAX = 10;
+
+interface ProjectState {
+  recents: string[];
+  pins: string[];
+}
+
+function emptyState(): ProjectState {
+  return { recents: [], pins: [] };
+}
+
+function statePath(vault: string, project: string): string {
+  return safePath(vault, project, STATE_FILE);
+}
+
+function loadState(vault: string, project: string): ProjectState {
+  const p = statePath(vault, project);
+  if (!fs.existsSync(p)) return emptyState();
+  try {
+    const data = JSON.parse(fs.readFileSync(p, "utf-8")) as Partial<ProjectState>;
+    const strings = (a: unknown): string[] =>
+      Array.isArray(a) ? a.filter((x): x is string => typeof x === "string") : [];
+    return { recents: strings(data.recents), pins: strings(data.pins) };
+  } catch {
+    return emptyState(); // corrupt → reset rather than crash
+  }
+}
+
+function saveState(vault: string, project: string, state: ProjectState): void {
+  const p = statePath(vault, project);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(state, null, 2), "utf-8");
+}
+
+/** Canonical "type/name" form of a doc rel, scope-checked. */
+function canonicalRel(vault: string, project: string, rel: string): string {
+  const abs = safePath(vault, project, rel);
+  return path.relative(projectDir(vault, project), abs).split(path.sep).join("/");
+}
+
+function docFileExists(vault: string, project: string, rel: string): boolean {
+  try {
+    const abs = safePath(vault, project, rel);
+    return fs.existsSync(abs) && fs.statSync(abs).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/** Drop recents/pins entries whose files no longer exist; persist if changed. */
+function pruneState(vault: string, project: string, state: ProjectState): ProjectState {
+  const recents = state.recents.filter((r) => docFileExists(vault, project, r));
+  const pins = state.pins.filter((r) => docFileExists(vault, project, r));
+  if (recents.length !== state.recents.length || pins.length !== state.pins.length) {
+    const cleaned = { recents, pins };
+    saveState(vault, project, cleaned);
+    return cleaned;
+  }
+  return state;
+}
+
+/** Record that a document was opened: most-recent-first, de-duped, capped. */
+export function recordOpen(vault: string, project: string, rel: string): void {
+  let key: string;
+  try {
+    key = canonicalRel(vault, project, rel);
+  } catch {
+    return; // out-of-scope path: ignore (recency is a side-channel, never throw)
+  }
+  const state = loadState(vault, project);
+  const recents = [key, ...state.recents.filter((r) => r !== key)].slice(0, RECENTS_MAX);
+  saveState(vault, project, { recents, pins: state.pins });
+}
+
+/** Most-recently-opened docs (newest first), pruned of stale entries. */
+export function getRecents(vault: string, project: string, limit = RECENTS_MAX): string[] {
+  const state = pruneState(vault, project, loadState(vault, project));
+  return state.recents.slice(0, limit);
+}
+
+/** Pin a document so it stays at the top of the homepage / quick-open. */
+export function pin(vault: string, project: string, rel: string): void {
+  const key = canonicalRel(vault, project, rel);
+  if (!docFileExists(vault, project, key)) throw new DockyError(`Document not found: ${rel}`);
+  const state = loadState(vault, project);
+  if (state.pins.includes(key)) return;
+  saveState(vault, project, { recents: state.recents, pins: [...state.pins, key] });
+}
+
+export function unpin(vault: string, project: string, rel: string): void {
+  const key = canonicalRel(vault, project, rel);
+  const state = loadState(vault, project);
+  const pins = state.pins.filter((r) => r !== key);
+  if (pins.length !== state.pins.length) saveState(vault, project, { recents: state.recents, pins });
+}
+
+/** Pinned docs (in pin order), pruned of stale entries. */
+export function getPins(vault: string, project: string): string[] {
+  return pruneState(vault, project, loadState(vault, project)).pins;
+}
+
+/** Remove a rel from recents/pins — used after rm/mv invalidates a location. */
+function forgetRel(vault: string, project: string, rel: string): void {
+  const key = rel.split(path.sep).join("/");
+  const state = loadState(vault, project);
+  const recents = state.recents.filter((r) => r !== key);
+  const pins = state.pins.filter((r) => r !== key);
+  if (recents.length !== state.recents.length || pins.length !== state.pins.length) {
+    saveState(vault, project, { recents, pins });
+  }
+}
+
+// --------------------------------------------------------------------------- //
+// Agent context bundle (F07)
+// --------------------------------------------------------------------------- //
+export interface ContextItem {
+  rel: string;
+  type: string;
+  status: DocStatus;
+  title: string;
+  tags: string[];
+  score: number;
+  excerpt: string;
+}
+
+export interface ContextBundle {
+  project: string;
+  items: ContextItem[];
+  truncatedBy: "budget" | "count" | null;
+  note: string | null;
+}
+
+/** Rough token estimate (avoids a tokenizer dep): ~4 chars/token. */
+function estTokens(s: string): number {
+  return Math.ceil(s.length / 4);
+}
+
+/** First meaningful content line (skips frontmatter + headings), truncated. */
+function firstParagraph(body: string): string {
+  let text = body;
+  const fm = text.match(/^---\n[\s\S]*?\n---\n?/);
+  if (fm) text = text.slice(fm[0].length);
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    return line.length > 160 ? line.slice(0, 157) + "…" : line;
+  }
+  return "";
+}
+
+/**
+ * Build a ranked, freshness-filtered, budget-bounded bundle of the project's
+ * most relevant docs for an agent (F07). Composes F01 (relevance), F03 (status,
+ * archived excluded), and F04 (recents/pins) — each degrades gracefully if
+ * absent. Never leaves the project scope.
+ */
+export function buildContext(
+  vault: string,
+  project: string,
+  opts: { query?: string; budget?: number } = {}
+): ContextBundle {
+  const query = (opts.query ?? "").trim();
+  const all = listDocs(vault, project);
+  const archivedCount = all.filter((d) => d.status === "archived").length;
+  const docs = filterDocs(all); // hide archived
+
+  const pins = new Set(getPins(vault, project));
+  const recents = getRecents(vault, project);
+  const recentRank = new Map<string, number>();
+  recents.forEach((rel, i) => recentRank.set(rel, recents.length - i));
+
+  const terms = query ? query.toLowerCase().split(/\s+/).filter(Boolean) : [];
+  const snippetByRel = new Map<string, string>();
+  if (query) {
+    for (const h of searchDocs(vault, project, query)) {
+      if (!snippetByRel.has(h.rel)) snippetByRel.set(h.rel, h.snippet);
+    }
+  }
+
+  function relevance(d: DocInfo, body: string): number {
+    if (!terms.length) return 0;
+    const title = d.title.toLowerCase();
+    const name = d.name.toLowerCase();
+    const tags = d.tags.join(" ").toLowerCase();
+    const low = body.toLowerCase();
+    let s = 0;
+    for (const t of terms) {
+      if (title.includes(t)) s += 6;
+      if (name.includes(t)) s += 3;
+      if (tags.includes(t)) s += 4;
+      let idx = low.indexOf(t);
+      let n = 0;
+      while (idx >= 0 && n < 5) {
+        n++;
+        idx = low.indexOf(t, idx + t.length);
+      }
+      s += n;
+    }
+    return s;
+  }
+
+  function metaScore(d: DocInfo): number {
+    let s = d.status === "active" ? 3 : d.status === "draft" ? 1 : 0;
+    if (pins.has(d.rel)) s += 5;
+    s += recentRank.get(d.rel) ?? 0;
+    if (d.stale) s -= 2;
+    if (d.type === "design" || d.type === "plan") s += 1;
+    return s;
+  }
+
+  const scored = docs.map((d) => {
+    let body = "";
+    try {
+      body = fs.readFileSync(d.path, "utf-8");
+    } catch {
+      /* unreadable → empty body */
+    }
+    const rel = relevance(d, body);
+    const excerpt = snippetByRel.get(d.rel) || firstParagraph(body) || d.title;
+    return { d, rel, score: rel + metaScore(d), excerpt };
+  });
+
+  const noteParts: string[] = [];
+  let candidates = scored;
+  if (query) {
+    const matched = scored.filter((s) => s.rel > 0);
+    if (matched.length) {
+      candidates = matched;
+    } else {
+      noteParts.push(`无 '${query}' 命中,返回项目概览`);
+    }
+  }
+  candidates = [...candidates].sort((a, b) => b.score - a.score || a.d.rel.localeCompare(b.d.rel));
+
+  const toItem = (s: (typeof scored)[number]): ContextItem => ({
+    rel: s.d.rel,
+    type: s.d.type,
+    status: s.d.status,
+    title: s.d.title,
+    tags: s.d.tags,
+    score: s.score,
+    excerpt: s.excerpt,
+  });
+
+  const MAX_ITEMS = 8;
+  const items: ContextItem[] = [];
+  let truncatedBy: "budget" | "count" | null = null;
+
+  if (typeof opts.budget === "number" && opts.budget > 0) {
+    let used = 0;
+    for (const s of candidates) {
+      const item = toItem(s);
+      const cost = estTokens(`${item.title} ${item.rel} ${item.excerpt}`) + 8;
+      if (items.length > 0 && used + cost > opts.budget) {
+        truncatedBy = "budget";
+        break;
+      }
+      items.push(item);
+      used += cost;
+    }
+  } else {
+    for (const s of candidates.slice(0, MAX_ITEMS)) items.push(toItem(s));
+    if (candidates.length > MAX_ITEMS) truncatedBy = "count";
+  }
+
+  if (archivedCount > 0) noteParts.unshift(`已排除 ${archivedCount} 篇 archived`);
+  return { project, items, truncatedBy, note: noteParts.length ? noteParts.join(";") : null };
+}
+
+// --------------------------------------------------------------------------- //
 // INDEX generation
 // --------------------------------------------------------------------------- //
 export function generateIndex(vault: string, project: string): string {
-  const docs = listDocs(vault, project);
+  const docs = filterDocs(listDocs(vault, project)); // archived hidden by default
   const now = new Date();
   const stamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(
     now.getDate()
   ).padStart(2, "0")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-  const lines = [`# ${project} — 文档索引`, "", `_自动生成于 ${stamp}_`, ""];
+  const stale = docs.filter((d) => d.stale).length;
+  const lines = [`# ${project} — 文档索引`, "", `_自动生成于 ${stamp}${stale ? ` · ⚠ ${stale} 篇可能陈旧` : ""}_`, ""];
   if (docs.length === 0) lines.push("_(暂无文档)_");
   for (const t of DOC_TYPES) {
     const group = docs.filter((d) => d.type === t);
     if (group.length === 0) continue;
     lines.push(`## ${t}`, "");
-    for (const d of group) lines.push(`- [${d.title}](${d.rel})`);
+    for (const d of group) {
+      const mark = d.stale ? "⚠ " : "";
+      const badge = d.status !== "active" ? ` _[${d.status}]_` : "";
+      const tags = d.tags.length ? "  " + d.tags.map((t) => `#${t}`).join(" ") : "";
+      lines.push(`- ${mark}[${d.title}](${d.rel})${badge}${tags}`);
+    }
     lines.push("");
   }
   const base = projectDir(vault, project);

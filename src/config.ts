@@ -20,18 +20,29 @@ export function configPath(vault: string): string {
   return path.join(vault, CONFIG_RELPATH);
 }
 
+export const DEFAULT_STALE_DAYS = 30;
+
 export function defaultConfig(): Config {
-  return { version: 1, types: [...DOC_TYPES], projects: {} };
+  return {
+    version: 1,
+    types: [...DOC_TYPES],
+    projects: {},
+    staleDays: DEFAULT_STALE_DAYS,
+    autocommit: "auto",
+  };
 }
 
 export function loadConfig(vault: string): Config {
   const cp = configPath(vault);
   if (!fs.existsSync(cp)) return defaultConfig();
   const data = (yaml.load(fs.readFileSync(cp, "utf-8")) as Partial<Config>) || {};
+  const mode = data.autocommit;
   return {
     version: data.version ?? 1,
     types: data.types ?? [...DOC_TYPES],
     projects: data.projects ?? {},
+    staleDays: typeof data.staleDays === "number" ? data.staleDays : DEFAULT_STALE_DAYS,
+    autocommit: mode === "manual" || mode === "off" ? mode : "auto",
   };
 }
 

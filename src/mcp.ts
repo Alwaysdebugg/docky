@@ -54,17 +54,22 @@ server.registerTool(
   "list_docs",
   {
     description:
-      "List documents within a project's scope (optionally filtered by type). " +
+      "List documents within a project's scope. Optionally filter by type, " +
+      "lifecycle status, or tag. Archived docs are hidden unless status='archived'. " +
       "Prefer calling this (and reading INDEX) before pulling full doc bodies.",
     inputSchema: {
       project: z.string(),
       type: z.string().optional().describe("design | plan | debug | code-review | prompts"),
+      status: z.string().optional().describe("draft | active | done | archived"),
+      tag: z.string().optional().describe("Filter to docs carrying this tag."),
     },
   },
-  async ({ project, type }) => {
+  async ({ project, type, status, tag }) => {
     try {
-      const docs = core.listDocs(vault(), project, type);
-      return text(docs.map((d) => ({ type: d.type, title: d.title, rel: d.rel })));
+      const docs = core.filterDocs(core.listDocs(vault(), project, type), { status, tag });
+      return text(
+        docs.map((d) => ({ type: d.type, title: d.title, rel: d.rel, status: d.status, tags: d.tags, stale: d.stale }))
+      );
     } catch (e) {
       return fail(e);
     }
@@ -107,18 +112,50 @@ server.registerTool(
 server.registerTool(
   "write_doc",
   {
-    description: "Write/overwrite a document into <project>/<type>/<name>.md (scope-checked).",
+    description:
+      "Write/overwrite a document into <project>/<type>/<name>.md (scope-checked). " +
+      "Pass scaffold=true to prefill the type's template skeleton (status: draft).",
     inputSchema: {
       project: z.string(),
       type: z.string(),
       name: z.string(),
-      content: z.string(),
+      content: z.string().optional(),
+      scaffold: z.boolean().optional().describe("Prefill from the type's template skeleton (F06)."),
     },
   },
-  async ({ project, type, name, content }) => {
+  async ({ project, type, name, content, scaffold }) => {
     try {
-      const dest = core.writeDoc(vault(), project, type, name, content);
+      let body = content ?? "";
+      if (scaffold) {
+        const skeleton = core.renderScaffold(vault(), type, name.replace(/\.md$/i, ""));
+        body = body ? `${skeleton}\n\n${body}` : skeleton;
+      }
+      const dest = core.writeDoc(vault(), project, type, name, body);
       return text({ path: dest, rel: `${type}/${dest.split("/").pop()}` });
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.registerTool(
+  "get_context",
+  {
+    description:
+      "One-shot relevant-doc bundle for a project: items ranked by relevance " +
+      "(when query is given) plus status freshness and recent access, with archived " +
+      "docs excluded and the bundle truncated to an approximate token budget. Each " +
+      "item carries {rel, type, status, title, score, excerpt}. Prefer this over " +
+      "multiple list_docs + read_doc round-trips when gathering context.",
+    inputSchema: {
+      project: z.string(),
+      query: z.string().optional().describe("Focus the bundle on a topic; omit for a project overview."),
+      budget: z.number().optional().describe("Approximate token budget; the bundle is truncated to fit."),
+    },
+  },
+  async ({ project, query, budget }) => {
+    try {
+      return text(core.buildContext(vault(), project, { query, budget }));
     } catch (e) {
       return fail(e);
     }
