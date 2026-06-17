@@ -44,6 +44,23 @@ describe("TUI", () => {
     expect(frame).toContain("/list");
   });
 
+  it("/clear emits the terminal clear sequence (real-terminal wipe)", async () => {
+    // ink-testing-library does not emulate terminal screen-clearing, so we
+    // verify the mechanism: /clear writes the clear-screen+scrollback escape.
+    const { frames, stdin } = render(<App vault={vault} initialProject="p" />);
+    stdin.write("/help");
+    await delay(20);
+    stdin.write("\r");
+    await delay(40);
+    const clearSeq = String.fromCharCode(27) + "[2J";
+    expect(frames.join("").includes(clearSeq)).toBe(false); // not yet
+    stdin.write("/clear");
+    await delay(20);
+    stdin.write("\r");
+    await delay(50);
+    expect(frames.join("").includes(clearSeq)).toBe(true); // clear emitted
+  });
+
   it("navigates the menu with the down arrow", async () => {
     const { lastFrame, stdin } = render(<App vault={vault} initialProject="p" />);
     stdin.write("/");

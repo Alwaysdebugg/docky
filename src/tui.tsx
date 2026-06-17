@@ -5,7 +5,7 @@
  * the full command menu (filtered as you type); Tab completes. No panes.
  */
 import React, { useState } from "react";
-import { Box, Static, Text, render, useApp, useInput, useStdin } from "ink";
+import { Box, Static, Text, render, useApp, useInput, useStdin, useStdout } from "ink";
 import TextInput from "ink-text-input";
 import { OutLine, executeCommand, suggest } from "./commands.js";
 import * as core from "./core.js";
@@ -69,6 +69,8 @@ let LINE_KEY = 0;
 export function App({ vault, initialProject }: AppProps) {
   const { exit } = useApp();
   const { stdin, setRawMode, isRawModeSupported } = useStdin();
+  const { write } = useStdout();
+  const [clearKey, setClearKey] = useState(0);
   const [project, setProject] = useState<string | null>(initialProject);
   const [history, setHistory] = useState<HistItem[]>(
     welcomeItems().map((l) => ({ ...l, key: LINE_KEY++ }))
@@ -93,26 +95,22 @@ export function App({ vault, initialProject }: AppProps) {
     setHistory((h) => [...h, ...lines.map((l) => ({ ...l, key: LINE_KEY++ }))]);
   }
 
-  /** Render a doc and view it in the same-terminal pager, suspending Ink. */
-  function openInPager(rel: string): void {
-    if (!project) {
-      append([{ text: "› /open " + rel, level: "in" }, { text: "当前没有选中项目,用 /use 切换。", level: "err" }]);
-      return;
-    }
-    let content: string;
+  /** Truly clear: wipe the terminal (incl. scrollback), reset history, and
+   *  remount <Static> so its committed lines are forgotten. */
+  function clearScreen() {
+    const ESC = String.fromCharCode(27);
     try {
-      content = core.readDoc(vault, project, rel);
-    } catch (e) {
-      const msg = e instanceof DockyError ? e.message : `错误: ${(e as Error).message}`;
-      append([{ text: "› /open " + rel, level: "in" }, { text: msg, level: "err" }]);
-      return;
+      write(`${ESC}[2J${ESC}[3J${ESC}[H`); // clear screen + scrollback + home
+    } catch {
+      /* ignore (non-TTY) */
     }
-    const rendered = renderMarkdown(content);
-    if (!process.stdout.isTTY || !isRawModeSupported) {
-      append([{ text: "› /open " + rel, level: "in" }, ...rendered.split("\n").map((t) => ({ text: t, level: "out" as const }))]);
-      return;
-    }
-    append([{ text: `› /open ${rel}（在分页器中查看,按 q 返回）`, level: "in" }]);
+    setHistory([]);
+    setClearKey((k) => k + 1);
+  }
+
+  /** Suspend Ink, show rendered content in the same-terminal pager, resume. */
+  function runPager(rendered: string): boolean {
+    if (!process.stdout.isTTY || !isRawModeSupported) return false;
     try {
       setRawMode(false);
       stdin.pause();
@@ -122,6 +120,33 @@ export function App({ vault, initialProject }: AppProps) {
       setRawMode(true);
       setRedraw((r) => r + 1); // force Ink to repaint after the pager
     }
+    return true;
+  }
+
+  /** Read a doc (scope-checked), render it, and view it in the pager. */
+  function pageDoc(proj: string, rel: string): void {
+    let content: string;
+    try {
+      content = core.readDoc(vault, proj, rel);
+    } catch (e) {
+      const msg = e instanceof DockyError ? e.message : `错误: ${(e as Error).message}`;
+      append([{ text: "› " + rel, level: "in" }, { text: msg, level: "err" }]);
+      return;
+    }
+    const rendered = renderMarkdown(content);
+    if (!runPager(rendered)) {
+      // no TTY: fall back to inline output
+      append([{ text: "› " + rel, level: "in" }, ...rendered.split("\n").map((t) => ({ text: t, level: "out" as const }))]);
+    }
+  }
+
+  /** /open <rel> in REPL mode. */
+  function openInPager(rel: string): void {
+    if (!project) {
+      append([{ text: "› /open " + rel, level: "in" }, { text: "当前没有选中项目,用 /use 切换。", level: "err" }]);
+      return;
+    }
+    pageDoc(project, rel);
   }
 
   /** Enter the interactive, hierarchical document browser. */
@@ -180,7 +205,7 @@ export function App({ vault, initialProject }: AppProps) {
     }
     const res = executeCommand(vault, project, raw);
     if (res.clear) {
-      setHistory([]);
+      clearScreen();
       setValue("");
       return;
     }
@@ -213,6 +238,11 @@ export function App({ vault, initialProject }: AppProps) {
       if (key.upArrow) setBrowseSel((s) => Math.max(0, s - 1));
       else if (key.downArrow) setBrowseSel((s) => Math.min(browseDocs.length - 1, s + 1));
       else if (key.return) {
+        // Enter = full read in the same-terminal pager (no app switch).
+        const d = browseDocs[browseSel];
+        if (d) pageDoc(d.project, d.rel);
+      } else if (input === "e") {
+        // e = open in the external editor (only when you actually want to edit).
         const d = browseDocs[browseSel];
         if (d) {
           openExternally(d.path);
@@ -274,6 +304,18 @@ export function App({ vault, initialProject }: AppProps) {
     return rows;
   }
 
+  // Raw-markdown preview of the highlighted doc (for the browse pane).
+  function previewLines(maxLines = 22): string[] {
+    const d = browseDocs[browseSel];
+    if (!d) return [];
+    try {
+      const raw = core.readDoc(vault, d.project, d.rel);
+      return raw.split("\n").slice(0, maxLines);
+    } catch {
+      return ["(无法读取)"];
+    }
+  }
+
   // Rows for the project selector (name + dim path).
   function projectRows(): React.ReactNode[] {
     const meta = core.listProjects(vault);
@@ -295,7 +337,7 @@ export function App({ vault, initialProject }: AppProps) {
 
   return (
     <Box flexDirection="column">
-      <Static items={history}>
+      <Static key={clearKey} items={history}>
         {(l) =>
           l.banner ? (
             <Banner key={l.key} />
@@ -310,9 +352,20 @@ export function App({ vault, initialProject }: AppProps) {
       {mode === "browse" ? (
         <Box flexDirection="column" marginTop={1}>
           <Text color="cyan">{browseTitle}</Text>
-          {browseRows()}
+          <Box>
+            <Box flexDirection="column" width={32} marginRight={1}>
+              {browseRows()}
+            </Box>
+            <Box flexDirection="column" flexGrow={1} borderStyle="round" borderColor="gray" paddingX={1}>
+              {previewLines().map((l, i) => (
+                <Text key={i} dimColor wrap="truncate-end">
+                  {l || " "}
+                </Text>
+              ))}
+            </Box>
+          </Box>
           <Box marginTop={1}>
-            <Text dimColor>↑/↓ 选择 · Enter 用默认应用打开 · Esc/q 返回</Text>
+            <Text dimColor>↑/↓ 选择 · Enter 全屏查看(终端内) · e 编辑器打开 · Esc/q 返回</Text>
           </Box>
         </Box>
       ) : mode === "projects" ? (

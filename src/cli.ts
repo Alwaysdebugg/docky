@@ -1,11 +1,28 @@
 #!/usr/bin/env node
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { Command } from "commander";
 import * as core from "./core.js";
 import { listProjects } from "./core.js";
 import { getVaultPath, isInitialized } from "./config.js";
 import { viewMarkdown } from "./pager.js";
+import { DOCKY_HOOK_ENTRIES, contextText, guardDecision, mergeHooks } from "./hooks.js";
 import { DOC_TYPES, DockyError } from "./types.js";
+
+function readStdin(): Promise<string> {
+  return new Promise((resolve) => {
+    if (process.stdin.isTTY) {
+      resolve("");
+      return;
+    }
+    let data = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (c) => (data += c));
+    process.stdin.on("end", () => resolve(data));
+    setTimeout(() => resolve(data), 1500); // safety timeout
+  });
+}
 
 const program = new Command();
 
@@ -256,6 +273,56 @@ program
     } catch (e) {
       fail((e as Error).message);
     }
+  });
+
+// ---- Claude Code hook integration ---- //
+const hooks = program.command("hooks").description("Claude Code hook integration (install + handlers).");
+
+hooks
+  .command("install")
+  .description("Install docky hooks into Claude Code settings (project by default).")
+  .option("--user", "Write to ~/.claude/settings.json instead of ./.claude/settings.json.")
+  .action((opts: { user?: boolean }) => {
+    const dir = opts.user
+      ? path.join(os.homedir(), ".claude")
+      : path.join(process.cwd(), ".claude");
+    const file = path.join(dir, "settings.json");
+    let settings: Record<string, unknown> = {};
+    if (fs.existsSync(file)) {
+      try {
+        settings = JSON.parse(fs.readFileSync(file, "utf-8"));
+      } catch {
+        fail(`现有 settings.json 不是合法 JSON,请先修复:${file}`);
+      }
+    }
+    const { settings: merged, added } = mergeHooks(settings, DOCKY_HOOK_ENTRIES);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(merged, null, 2) + "\n", "utf-8");
+    if (added.length === 0) {
+      ok(`docky hooks 已存在,无需改动:${file}`);
+    } else {
+      ok(`已写入 docky hooks → ${file}`);
+      added.forEach((a) => console.log(`  + ${a}`));
+    }
+  });
+
+// PreToolUse handler: reads the hook JSON from stdin, may deny markdown writes.
+hooks
+  .command("guard")
+  .description("(internal) PreToolUse handler invoked by Claude Code.")
+  .action(async () => {
+    const input = await readStdin();
+    const out = guardDecision(input, vault());
+    if (out) console.log(out);
+  });
+
+// SessionStart handler: prints policy + current project's docs as context.
+hooks
+  .command("context")
+  .description("(internal) SessionStart handler invoked by Claude Code.")
+  .action(() => {
+    const v = vault();
+    console.log(contextText(v, process.cwd(), isInitialized(v)));
   });
 
 async function launchTui(): Promise<void> {

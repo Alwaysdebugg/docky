@@ -84,7 +84,7 @@ docky
 | `/init [项目名] [路径]` | 把当前仓库登记为项目(默认用仓库名)并切换;`/register` 为别名 |
 | `/projects` | 进入项目选择器(↑/↓ 选择,Enter 切换到该项目,Esc/q 返回) |
 | `/use <项目>` / `/whoami` | 直接切换 / 识别当前项目 |
-| `/list [类型]` | 进入层级文档浏览器(按类型分组、显示文件名;↑/↓ 选择,Enter 用默认应用打开,Esc/q 返回) |
+| `/list [类型]` | 层级文档浏览器:左侧按类型分组列出文件,右侧**实时预览**;↑/↓ 选择,Enter 终端内全屏查看,`e` 用编辑器打开,Esc/q 返回 |
 | `/search <关键词>` | 作用域内全文检索 |
 | `/open <相对路径>` | 渲染 md 并在同终端分页器中查看(按 q 返回 docky) |
 | `/add <类型> <路径> [名]` | 归档 md |
@@ -124,6 +124,24 @@ MCP 客户端配置:
 | `read_doc(project, path)` | 读取单篇,路径越界拒绝 |
 | `search_docs(project, query, type?)` | 作用域内关键词检索 |
 | `write_doc(project, type, name, content)` | 写入文档 |
+
+## Claude Code 集成(hooks)
+
+让 agent 默认走 docky 读写过程文档,一条命令安装护栏(无需手写脚本或 jq):
+
+```bash
+docky hooks install          # 写入 ./.claude/settings.json(项目级)
+docky hooks install --user   # 或写入 ~/.claude/settings.json(全局)
+```
+
+安装两个 hook(幂等,可重复运行):
+
+- `SessionStart → docky hooks context`:会话开始时注入"过程文档走 docky"的政策,并列出当前项目已有文档,引导 agent 优先从中心仓库读。
+- `PreToolUse (Edit|Write) → docky hooks guard`:当 agent 想把过程类 `.md` 写进仓库时**拦截**并提示改用 `write_doc`;放行 README/CHANGELOG 等常规仓库文档,以及写入 vault 的文件。
+
+`docky hooks guard` / `docky hooks context` 是 hook 调用的内置处理器(从 stdin 读 Claude Code 的事件 JSON、按 docky 逻辑输出),不依赖外部脚本。
+
+> 注:hook 只能拦截/放行/注入上下文,不能强制模型去调某个工具。"读优先走 vault" 主要靠 SessionStart 注入的上下文 + `CLAUDE.md` 引导;写这一侧由 PreToolUse 硬护栏兜底。
 
 ## 作用域隔离
 
