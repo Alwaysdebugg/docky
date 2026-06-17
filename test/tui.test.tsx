@@ -23,10 +23,11 @@ afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 describe("TUI", () => {
-  it("renders the welcome banner (no command list)", () => {
+  it("renders the welcome logo banner (no command list)", () => {
     const { lastFrame } = render(<App vault={vault} initialProject="p" />);
     const frame = lastFrame() ?? "";
-    expect(frame).toContain("docky");
+    expect(frame).toContain("█"); // ASCII wordmark
+    expect(frame).toContain("Docky");
     expect(frame).toContain("/help");
     expect(frame).toContain("[p]");
     // the full command catalogue should NOT be dumped on screen anymore

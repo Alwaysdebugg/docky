@@ -33,34 +33,28 @@ function welcomeItems(): Array<OutLine & { banner?: boolean }> {
   return [{ text: "", level: "info", banner: true }];
 }
 
-// A little horse drawn with the ✻ star glyph (constellation style).
-const HORSE = [
-  "      ✻ ✻",
-  "✻      ✻ ✻ ✻",
-  " ✻ ✻ ✻ ✻ ✻ ✻ ✻",
-  " ✻ ✻ ✻ ✻ ✻ ✻",
-  " ✻   ✻   ✻   ✻",
+// oh-my-logo style ASCII wordmark (ANSI Shadow font) for "DOCKY".
+const LOGO = [
+  "██████╗  ██████╗  ██████╗██╗  ██╗██╗   ██╗",
+  "██╔══██╗██╔═══██╗██╔════╝██║ ██╔╝╚██╗ ██╔╝",
+  "██║  ██║██║   ██║██║     █████╔╝  ╚████╔╝ ",
+  "██║  ██║██║   ██║██║     ██╔═██╗   ╚██╔╝  ",
+  "██████╔╝╚██████╔╝╚██████╗██║  ██╗   ██║   ",
+  "╚═════╝  ╚═════╝  ╚═════╝╚═╝  ╚═╝   ╚═╝   ",
 ];
-const ACCENT = "#d97757"; // warm clay/orange
+// Top-to-bottom gradient (cyan → purple), like oh-my-logo.
+const GRADIENT = ["#00d7ff", "#27b6e6", "#5f93f0", "#8f6def", "#b35cef", "#d75fff"];
 
-/** Claude-Code-style welcome card with a star-glyph horse mascot. */
+/** oh-my-logo style welcome wordmark. */
 function Banner() {
   return (
-    <Box borderStyle="round" borderColor={ACCENT} paddingX={1} marginBottom={1}>
-      <Box flexDirection="column" marginRight={2}>
-        {HORSE.map((l, i) => (
-          <Text key={i} color={ACCENT}>
-            {l}
-          </Text>
-        ))}
-      </Box>
-      <Box flexDirection="column" justifyContent="center">
-        <Text bold color="cyan">
-          docky
+    <Box flexDirection="column" marginBottom={1}>
+      {LOGO.map((l, i) => (
+        <Text key={i} bold color={GRADIENT[i]}>
+          {l}
         </Text>
-        <Text dimColor>文档管理</Text>
-        <Text dimColor>输入 / 看命令 · /help 帮助 · /exit 退出</Text>
-      </Box>
+      ))}
+      <Text dimColor>Docky · 文档管理 · 输入 / 看命令 · /help 帮助 · /exit 退出</Text>
     </Box>
   );
 }
