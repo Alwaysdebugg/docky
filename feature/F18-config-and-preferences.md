@@ -2,11 +2,12 @@
 title: F18 · 配置与偏好管理
 type: plan
 owner: PM
-status: proposed
+status: done
 priority: P1
 effort: S
 round: R4
 created: 2026-06-17
+completed: 2026-06-18
 tags: [治理, 配置, cli]
 ---
 
@@ -60,11 +61,11 @@ $ docky config set staleDays 14
 
 ## 验收标准
 
-- [ ] `docky config` 列出全部键、当前值、默认值与说明。
-- [ ] `get`/`set` 生效并持久化;非法值被拒并提示合法范围。
-- [ ] `set staleDays N` 立即影响 F03 的陈旧判定。
-- [ ] TUI `/config` 可查看;作用域/隔离不受影响。
-- [ ] 配置读写与校验有单测(参考 `test/`,向后兼容旧 config)。
+- [x] `docky config` 列出全部键、当前值、默认值与说明。
+- [x] `get`/`set` 生效并持久化;非法值被拒并提示合法范围。
+- [x] `set staleDays N` 立即影响 F03 的陈旧判定。
+- [x] TUI `/config` 可查看;作用域/隔离不受影响。
+- [x] 配置读写与校验有单测(参考 `test/`,向后兼容旧 config)。
 
 ## 衡量指标
 
@@ -80,3 +81,13 @@ $ docky config set staleDays 14
 
 - 成为 **F03(staleDays)/F08(autocommit)/F15(grants)/F16(主题宽度)/F01(编辑器分页器)** 的统一控制面。
 - 与 **F19 巡检** 互补:config 管"该怎样",lint 查"实际是否如此"。
+
+## 实现记录
+
+- done — 2026-06-18 实现并通过测试(197/197)。
+  - `src/config.ts`:`CONFIG_KEYS` 键注册表(说明/默认/getter/带校验的 setter);`getConfigValue`/`setConfigValue`(非法值与未知键抛 `DockyError` 并提示合法范围)/`listConfig`(当前值 + 默认 + 说明);写入经既有 `saveConfig` 落盘。纳管键:`staleDays`(F03)、`autocommit`(F08)、`theme`/`width`(F16);`width=0` 表示自适应(→ undefined)。
+  - `src/cli.ts`:`docky config`(列出 vault + 全部键)、`config <key>`/`config get <key>`(取值)、`config <key> <value>`/`config set <key> <value>`(改值,变更键标注"默认 …")——两种语法皆支持。
+  - `src/commands.ts`:`/config` 只读查看,并提示用 `docky config set` 修改。
+  - 向后兼容:旧 config 缺字段一律给默认(沿用 F03 容错),既有单测全过;作用域/隔离不受影响。
+  - 测试:`test/config.test.ts`(列出键+默认、get/set 持久化往返、非法值/未知键被拒、**`set staleDays 14` 立即影响 F03 陈旧判定**、旧 config 缺字段回落默认)+ `test/tui.test.tsx`(`/config` 只读展示)。CLI 实测 list/get/set/简写/非法拒绝。
+  - 备注:editor/pager 仍走 `$EDITOR`/`$PAGER` 环境变量(未来可按需接入为 config 键);`defaultProject` 暂未纳管(尚无对应字段),随后续接入。

@@ -8,12 +8,18 @@
  * any path that escapes the project directory, so an agent can never reach
  * another project's documents.
  */
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import * as core from "./core.js";
 import { getVaultPath } from "./config.js";
 import { DockyError } from "./types.js";
+import {
+  contextPromptMessages,
+  listResources,
+  readResource,
+  scaffoldPromptMessages,
+} from "./mcpresources.js";
 
 const server = new McpServer({ name: "docky", version: "0.1.0" });
 
@@ -96,13 +102,34 @@ server.registerTool(
 server.registerTool(
   "search_docs",
   {
-    description: "Keyword-search documents inside a project's scope.",
-    inputSchema: { project: z.string(), query: z.string(), type: z.string().optional() },
+    description:
+      "Search a project's docs (relevance-ranked, multi-snippet, hit-highlighted). " +
+      "Archived docs are excluded. Pass fuzzy=true for subsequence matching.",
+    inputSchema: {
+      project: z.string(),
+      query: z.string(),
+      type: z.string().optional(),
+      fuzzy: z.boolean().optional().describe("Fuzzy (subsequence) matching."),
+      across: z.boolean().optional().describe("Include granted (read-only) cross-project scopes (F15)."),
+    },
   },
-  async ({ project, query, type }) => {
+  async ({ project, query, type, fuzzy, across }) => {
     try {
-      const hits = core.searchDocs(vault(), project, query, type);
-      return text(hits.map((h) => ({ rel: h.rel, title: h.title, line: h.line, snippet: h.snippet })));
+      if (across) {
+        const hits = core.searchAcross(vault(), project, query, { type, fuzzy });
+        return text(
+          hits.map((h) => ({
+            project: h.project,
+            readonly: h.readonly,
+            rel: h.rel,
+            title: h.title,
+            score: h.score,
+            snippets: h.snippets,
+          }))
+        );
+      }
+      const hits = core.searchDocs(vault(), project, query, type, {}, { fuzzy });
+      return text(hits.map((h) => ({ rel: h.rel, title: h.title, score: h.score, snippets: h.snippets })));
     } catch (e) {
       return fail(e);
     }
@@ -113,25 +140,28 @@ server.registerTool(
   "write_doc",
   {
     description:
-      "Write/overwrite a document into <project>/<type>/<name>.md (scope-checked). " +
-      "Pass scaffold=true to prefill the type's template skeleton (status: draft).",
+      "Write a document into <project>/<type>/<name>.md (scope-checked). Smart by " +
+      "default (F20): in mode 'new' it will NOT silently overwrite or duplicate — if " +
+      "the name exists or a near-duplicate is found, it returns a suggestion instead " +
+      "of writing. Use mode=append (timestamped section), merge (preview), or replace " +
+      "(explicit overwrite). scaffold=true prefills the type template (F06).",
     inputSchema: {
       project: z.string(),
       type: z.string(),
       name: z.string(),
       content: z.string().optional(),
       scaffold: z.boolean().optional().describe("Prefill from the type's template skeleton (F06)."),
+      mode: z.enum(["new", "append", "merge", "replace"]).optional().describe("Write mode (F20; default new)."),
     },
   },
-  async ({ project, type, name, content, scaffold }) => {
+  async ({ project, type, name, content, scaffold, mode }) => {
     try {
       let body = content ?? "";
       if (scaffold) {
         const skeleton = core.renderScaffold(vault(), type, name.replace(/\.md$/i, ""));
         body = body ? `${skeleton}\n\n${body}` : skeleton;
       }
-      const dest = core.writeDoc(vault(), project, type, name, body);
-      return text({ path: dest, rel: `${type}/${dest.split("/").pop()}` });
+      return text(core.smartWrite(vault(), project, type, name, body, mode ?? "new"));
     } catch (e) {
       return fail(e);
     }
@@ -151,15 +181,81 @@ server.registerTool(
       project: z.string(),
       query: z.string().optional().describe("Focus the bundle on a topic; omit for a project overview."),
       budget: z.number().optional().describe("Approximate token budget; the bundle is truncated to fit."),
+      across: z
+        .boolean()
+        .optional()
+        .describe("Also include granted (read-only) cross-project scopes, tagged by source (F15)."),
     },
   },
-  async ({ project, query, budget }) => {
+  async ({ project, query, budget, across }) => {
     try {
-      return text(core.buildContext(vault(), project, { query, budget }));
+      return text(core.buildContext(vault(), project, { query, budget, across }));
     } catch (e) {
       return fail(e);
     }
   }
+);
+
+// --------------------------------------------------------------------------- //
+// Resources (F25): documents as docky://<project>/<type>/<name>
+// --------------------------------------------------------------------------- //
+function decVar(v: unknown): string {
+  const s = Array.isArray(v) ? String(v[0]) : String(v);
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+}
+
+server.registerResource(
+  "docky-docs",
+  new ResourceTemplate("docky://{project}/{type}/{name}", {
+    list: () => ({ resources: listResources(vault()) }),
+  }),
+  {
+    title: "docky documents",
+    description: "Project documents exposed as readable, browsable resources (scope-checked).",
+  },
+  async (_uri, variables) => {
+    const built = `docky://${decVar(variables.project)}/${decVar(variables.type)}/${decVar(variables.name)}`;
+    try {
+      const r = readResource(vault(), built);
+      return { contents: [{ uri: r.uri, text: r.text, mimeType: r.mimeType }] };
+    } catch (e) {
+      throw new Error(e instanceof DockyError ? e.message : `Error: ${(e as Error).message}`);
+    }
+  }
+);
+
+// --------------------------------------------------------------------------- //
+// Prompts (F25): one-click context / scaffolds
+// --------------------------------------------------------------------------- //
+server.registerPrompt(
+  "load-project-context",
+  {
+    description: "Load a project's relevant documents as context (wraps get_context / F07).",
+    argsSchema: { project: z.string(), query: z.string().optional() },
+  },
+  ({ project, query }) => ({ messages: contextPromptMessages(vault(), project, query) })
+);
+
+server.registerPrompt(
+  "start-debug-doc",
+  {
+    description: "Start a new debug document from the docky template (F06).",
+    argsSchema: { project: z.string(), name: z.string() },
+  },
+  ({ project, name }) => ({ messages: scaffoldPromptMessages(vault(), "debug", project, name) })
+);
+
+server.registerPrompt(
+  "start-design-doc",
+  {
+    description: "Start a new design document from the docky template (F06).",
+    argsSchema: { project: z.string(), name: z.string() },
+  },
+  ({ project, name }) => ({ messages: scaffoldPromptMessages(vault(), "design", project, name) })
 );
 
 async function main(): Promise<void> {

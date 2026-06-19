@@ -4,7 +4,7 @@
  */
 import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
-import { marked } from "marked";
+import { Marked, marked } from "marked";
 // marked-terminal renders Markdown to ANSI for the terminal.
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore - types are loose across versions
@@ -18,9 +18,25 @@ function ensureConfigured(): void {
   configured = true;
 }
 
-/** Render Markdown source to a colored, terminal-friendly string. */
-export function renderMarkdown(src: string): string {
+export interface RenderOpts {
+  width?: number;
+  theme?: "dark" | "none";
+}
+
+const ANSI = /\x1b\[[0-9;]*m/g;
+
+/** Render Markdown source to a terminal-friendly string. Width reflows long
+ *  lines; theme "none" strips color. Defaults preserve the original output. */
+export function renderMarkdown(src: string, opts: RenderOpts = {}): string {
   try {
+    if (opts.width || opts.theme === "none") {
+      const m = new Marked();
+      // @ts-ignore - markedTerminal returns a marked extension
+      m.use(markedTerminal(opts.width ? { width: opts.width, reflowText: true } : {}));
+      let out = String(m.parse(src)).replace(/\n+$/, "");
+      if (opts.theme === "none") out = out.replace(ANSI, "");
+      return out;
+    }
     ensureConfigured();
     return String(marked.parse(src)).replace(/\n+$/, "");
   } catch {

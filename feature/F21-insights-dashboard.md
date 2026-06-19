@@ -2,11 +2,12 @@
 title: F21 · 知识库洞察仪表盘
 type: plan
 owner: PM
-status: proposed
+status: done
 priority: P1
 effort: M
 round: R5
 created: 2026-06-17
+completed: 2026-06-18
 tags: [纵览, 洞察, 维护]
 ---
 
@@ -64,11 +65,11 @@ plan         6      7      1        1
 
 ## 验收标准
 
-- [ ] `docky stats` 输出类型×状态计数、陈旧/归档占比、标签热度。
-- [ ] 展示被引用最多与孤立文档(F12 在线时);展示健康计数(F19 在线时)。
-- [ ] TUI `/dashboard` 可查看;数字可点进对应列表(复用 F01)。
-- [ ] 纯只读,不修改文档;作用域隔离不变。
-- [ ] `src/stats.ts` 聚合逻辑有单测。
+- [x] `docky stats` 输出类型×状态计数、陈旧/归档占比、标签热度。
+- [x] 展示被引用最多与孤立文档(F12 在线时);展示健康计数(F19 在线时)。
+- [x] TUI `/dashboard` 可查看;数字可点进对应列表(复用 F01)。
+- [x] 纯只读,不修改文档;作用域隔离不变。
+- [x] `src/stats.ts` 聚合逻辑有单测。
 
 ## 衡量指标
 
@@ -84,3 +85,12 @@ plan         6      7      1        1
 
 - 把 **F03(状态/陈旧/标签)、F12(反链)、F08(活动)、F19(健康)** 的信号**聚合成一个鸟瞰视图**。
 - 与 **F04** 互补:F04 是"我最近碰过什么",F21 是"整库现在怎样";二者共同构成完整工作台首页。
+
+## 实现记录
+
+- done — 2026-06-18 实现并通过测试(215/215)。
+  - `src/stats.ts`(新增):`computeStats(vault, project)` 一次扫描 `listDocs`(含 archived)+ 单次读正文,聚合:**类型×状态矩阵 + 各类陈旧计数**、`statusTotals`、`staleTotal`、**被引用最多**(F12 `buildBacklinks` 反链数排序 Top-5)、**孤立文档**(无入链且无解析出链)、**标签热度**(F03 tags Top-8)、**健康概览**(F19 `lintProject` 的 error/warn/info 计数)。纯只读,不改文档。
+  - `src/cli.ts`:`docky stats`(别名 `dashboard`)输出概览表;`src/commands.ts`:`/dashboard` 文本概览。
+  - 优雅降级:各依赖(F12/F19)缺席时对应区块自然为空,不报错;作用域隔离不变。
+  - 测试:`test/stats.test.ts`(类型×状态+状态合计、被引用排序+孤立判定、标签热度、健康汇总反映 doctor error)+ `test/tui.test.tsx`(`/dashboard` 概览)。CLI 实测 stats 全量概览。
+  - 备注:数字"点进列表"复用既有 `/list --status/--stale`、`/links`、`/doctor`(本视图聚焦聚合呈现);不做时间序列图表(终端数字即可,非目标)。

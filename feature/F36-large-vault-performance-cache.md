@@ -18,7 +18,7 @@ tags: [性能, 缓存, 规模化]
 
 随着库变大,**每个操作都在重扫磁盘**:
 
-- `listDocs` 对每篇调 `readDocMeta(full)`,而它 `fs.readFileSync` 整篇来解析标题/frontmatter(`src/core.ts`、`:396`)——**每次列目录都把所有文件读一遍**。
+- `listDocs` 对每篇调 `readDocMeta(full)`,而它 `fs.readFileSync` 整篇来解析标题/frontmatter(`src/core.ts`)——**每次列目录都把所有文件读一遍**。
 - `searchDocs` 同样逐篇读全文(`core.ts`);`generateIndex`、F21 仪表盘、F19 巡检、F07 `get_context` 都建立在这次全量扫描上。
 - 后果:F02 快速打开的**即输即筛**、F13 检索、`/list` 在几百上千篇时会肉眼可见地卡——而绝大多数文件其实没变。
 

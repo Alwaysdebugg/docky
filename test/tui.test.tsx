@@ -5,6 +5,7 @@ import path from "node:path";
 import React from "react";
 import { render } from "ink-testing-library";
 import * as core from "../src/core.js";
+import { saveFolder } from "../src/savedsearch.js";
 import { App } from "../src/tui.js";
 
 let tmp: string;
@@ -33,6 +34,23 @@ describe("TUI", () => {
     // the full command catalogue should NOT be dumped on screen anymore
     expect(frame).not.toContain("/search");
     expect(frame).not.toContain("全文检索");
+  });
+
+  it("the command menu is a fixed-height scrolling window", async () => {
+    const { lastFrame, stdin } = render(<App vault={vault} initialProject="p" />);
+    stdin.write("/");
+    await delay(40);
+    let frame = lastFrame() ?? "";
+    expect(frame).toContain("▼ 还有"); // more commands below the window
+    expect(frame).not.toContain("▲ 还有"); // at the top — nothing hidden above yet
+    // a long list must not render every command at once (window ≤ 16, total ~44)
+    const menuRows = (frame.match(/▸|^ {2,}\//gm) ?? []).length;
+    expect(menuRows).toBeLessThan(20);
+    const DOWN = String.fromCharCode(27) + "[B";
+    for (let i = 0; i < 45; i++) stdin.write(DOWN); // scroll to the bottom
+    await delay(80);
+    frame = lastFrame() ?? "";
+    expect(frame).toContain("▲ 还有"); // window scrolled — items now hidden above
   });
 
   it("shows the command menu when typing /", async () => {
@@ -133,9 +151,9 @@ describe("TUI", () => {
     await delay(60);
     const frame = lastFrame() ?? "";
     expect(frame).toContain("search: session"); // header with query + count
-    expect(frame).toContain("debug/"); // grouped by type
-    expect(frame).toContain("login.md:2"); // name:line of the hit
-    expect(frame).toContain("session lost"); // snippet
+    expect(frame).toContain("debug/login.md:2"); // rel:line of the hit
+    expect(frame).toContain("「session」"); // highlighted hit (F13)
+    expect(frame).toContain("lost"); // snippet context
     expect(frame).toContain("跳到匹配行"); // results hint, not the static list
   });
 
@@ -227,6 +245,141 @@ describe("TUI", () => {
     expect(frame).toContain("arch.md");
     expect(frame).toContain("未分类");
     expect(frame).toContain("notes.md");
+  });
+
+  // F24 · saved searches / smart folders
+  it("homepage shows folders and /f opens one live", async () => {
+    core.writeDoc(vault, "p", "design", "draft1", "---\nstatus: draft\n---\n# Draft");
+    saveFolder(vault, "p", "待办", "--status draft");
+    const { lastFrame, stdin } = render(<App vault={vault} initialProject="p" />);
+    await delay(20);
+    expect(lastFrame() ?? "").toContain("智能文件夹"); // homepage surfaces folders
+    expect(lastFrame() ?? "").toContain("待办");
+    stdin.write("/f 待办");
+    await delay(20);
+    stdin.write("\r");
+    await delay(60);
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("📂 待办");
+    expect(frame).toContain("draft1.md");
+  });
+
+  // F23 · relationship graph
+  it("/graph shows the relationship graph and can open a node", async () => {
+    core.writeDoc(vault, "p", "design", "auth", "# 鉴权\n见 [[debug/login.md]]"); // links to seeded login
+    const { lastFrame, stdin } = render(<App vault={vault} initialProject="p" />);
+    stdin.write("/graph");
+    await delay(20);
+    stdin.write("\r");
+    await delay(60);
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("关系图谱");
+    expect(frame).toContain("login.md"); // hub or cluster member
+  });
+
+  // F22 · review inbox
+  it("/inbox lists pending agent docs; y approves and clears it", async () => {
+    core.smartWrite(vault, "p", "debug", "agentdoc", "# Agent Doc\nbody");
+    const { lastFrame, stdin } = render(<App vault={vault} initialProject="p" />);
+    stdin.write("/inbox");
+    await delay(20);
+    stdin.write("\r");
+    await delay(60);
+    expect(lastFrame() ?? "").toContain("收件箱");
+    expect(lastFrame() ?? "").toContain("agentdoc.md");
+    stdin.write("y"); // approve the current item
+    await delay(60);
+    expect(core.listPending(vault, "p").length).toBe(0);
+  });
+
+  // F21 · dashboard
+  it("/dashboard shows the knowledge-base overview", async () => {
+    const { lastFrame, stdin } = render(<App vault={vault} initialProject="p" />);
+    stdin.write("/dashboard");
+    await delay(20);
+    stdin.write("\r");
+    await delay(60);
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("概览");
+    expect(frame).toContain("debug"); // the type row for the seeded debug/login.md
+  });
+
+  // F19 · doc doctor
+  it("/doctor lists health issues, jumpable", async () => {
+    // beforeEach wrote debug/login.md with no frontmatter → a frontmatter error
+    const { lastFrame, stdin } = render(<App vault={vault} initialProject="p" />);
+    stdin.write("/doctor");
+    await delay(20);
+    stdin.write("\r");
+    await delay(60);
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("体检报告");
+    expect(frame).toContain("login.md");
+    expect(frame).toContain("frontmatter");
+  });
+
+  // F18 · config view
+  it("/config shows preferences read-only", async () => {
+    const { lastFrame, stdin } = render(<App vault={vault} initialProject="p" />);
+    stdin.write("/config");
+    await delay(20);
+    stdin.write("\r");
+    await delay(40);
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("staleDays");
+    expect(frame).toContain("autocommit");
+  });
+
+  // F16 · reading-view outline
+  it("/outline pops a TOC with heading line numbers", async () => {
+    core.writeDoc(vault, "p", "design", "doc", "# Top\n\n## 背景\n\n## 方案\n\n## 风险");
+    const { lastFrame, stdin } = render(<App vault={vault} initialProject="p" />);
+    stdin.write("/outline design/doc.md");
+    await delay(20);
+    stdin.write("\r");
+    await delay(60);
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("大纲");
+    expect(frame).toContain("背景");
+    expect(frame).toContain("风险");
+    expect(frame).toContain("L7"); // 风险 is on line 7
+  });
+
+  // F14 · arg completion + history
+  it("Tab completes a doc-path argument", async () => {
+    core.writeDoc(vault, "p", "design", "architecture", "# arch");
+    const { lastFrame, stdin } = render(<App vault={vault} initialProject="p" />);
+    stdin.write("/open arch");
+    await delay(40);
+    expect(lastFrame() ?? "").toContain("design/architecture.md"); // arg suggestion shown
+    stdin.write("\t"); // Tab completes the argument
+    await delay(40);
+    expect(lastFrame() ?? "").toContain("/open design/architecture.md");
+  });
+
+  it("↑ recalls commands from history into the prompt", async () => {
+    const { lastFrame, stdin } = render(<App vault={vault} initialProject="p" />);
+    stdin.write("/whoami");
+    stdin.write("\r"); // submit → recorded in history, input cleared
+    await delay(40);
+    const UP = String.fromCharCode(27) + "[A";
+    stdin.write(UP); // recall it back into the input
+    await delay(40);
+    // the prompt-prefixed form is unique to the input line (echoes lack "[p] ")
+    expect(lastFrame() ?? "").toContain("[p] › /whoami");
+  });
+
+  // F12 · wikilinks
+  it("/links opens a jumpable list of a doc's outlinks", async () => {
+    core.writeDoc(vault, "p", "design", "auth", "# auth\n见 [[debug/login.md]]");
+    const { lastFrame, stdin } = render(<App vault={vault} initialProject="p" />);
+    stdin.write("/links design/auth.md");
+    await delay(20);
+    stdin.write("\r");
+    await delay(60);
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("🔗");
+    expect(frame).toContain("login.md");
   });
 
   // F11 · multi-select batch

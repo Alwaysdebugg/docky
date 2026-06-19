@@ -2,11 +2,12 @@
 title: F19 · 文档质量巡检(doctor / lint)
 type: plan
 owner: PM
-status: proposed
+status: done
 priority: P0
 effort: M
 round: R4
 created: 2026-06-17
+completed: 2026-06-18
 tags: [治理, 质量, 健康度]
 ---
 
@@ -63,11 +64,11 @@ $ docky doctor -p my-app
 
 ## 验收标准
 
-- [ ] `docky doctor` 报告覆盖:缺/非法 frontmatter、无标题、断链、陈旧、未提交、游离文件。
-- [ ] 每条 issue 含严重度、位置、修复建议;有汇总与非零退出码。
-- [ ] `--fix` 仅做安全修复(补 frontmatter/设默认状态/重建 INDEX),不删文件。
-- [ ] TUI `/doctor` 可逐条跳转(复用 F01)。
-- [ ] `src/lint.ts` 各检查器有单测;作用域隔离不变。
+- [x] `docky doctor` 报告覆盖:缺/非法 frontmatter、无标题、断链、陈旧、未提交、游离文件。
+- [x] 每条 issue 含严重度、位置、修复建议;有汇总与非零退出码。
+- [x] `--fix` 仅做安全修复(补 frontmatter/设默认状态/重建 INDEX),不删文件。
+- [x] TUI `/doctor` 可逐条跳转(复用 F01)。
+- [x] `src/lint.ts` 各检查器有单测;作用域隔离不变。
 
 ## 衡量指标
 
@@ -83,3 +84,14 @@ $ docky doctor -p my-app
 
 - **巡检并收口前序成果**:审计 F03(陈旧/状态)、F06(frontmatter/模板)、F08(未提交)、F12(断链)。
 - 与 **F18** 互补:F18 定义"该怎样",F19 检查"是否如此",二者构成 docky 的治理闭环。
+
+## 实现记录
+
+- done — 2026-06-18 实现并通过测试(203/203)。
+  - `src/lint.ts`(新增):纯检查器 `missingFrontmatter` / `missingTitle`(去 frontmatter 后无 `#` 标题)/ `findOrphans`(类型目录之外的 .md);`lintProject(vault, project)` 汇总六类 issue(缺 frontmatter=error、无标题/断链(F12)/陈旧(F03)/游离=warn、未提交(F08)=info,按严重度排序,每条含位置 + 修复建议 + 是否可自动修);`fixProject` 仅做**安全幂等修复**——补 frontmatter(经 `setStatus` 让 gray-matter 落地 frontmatter)、重建 INDEX、`commitVault` 提交,**绝不删文件**。
+  - `src/cli.ts`:`docky doctor`(别名 `lint`)`[--fix]`——彩色分级报告 + 汇总 + **有 error 则退出码非零**(供 CI/hook)。
+  - `src/tui.tsx`:`/doctor` 进入可选中 issue 列表,Enter 跳到出问题的文档(复用 F01 `openDoc`)。
+  - `src/commands.ts`:`/doctor` 文本兜底(非 TUI 上下文)。
+  - 复用:F12 断链、F03 陈旧/`setStatus`、F08 `uncommittedCount`/`commitVault`;缺席提案对应检查自动跳过。作用域隔离不变(仅经 `listDocs`/`safePath`)。
+  - 测试:`test/lint.test.ts`(frontmatter/title 检查、findOrphans、lintProject 多类 issue + 排序、`--fix` 补 frontmatter 清除 error 且不删文件 + 保留正文、健康项目空报告)+ `test/tui.test.tsx`(`/doctor` 列表含 frontmatter 问题)。CLI 实测报告/严重度/退出码 1→0、`--fix` 自动修。
+  - 备注:`--fix` 只补 frontmatter/重建 INDEX/提交(保守安全);断链/陈旧/游离需人工处理(不自动删,清理交 F10/F11)。

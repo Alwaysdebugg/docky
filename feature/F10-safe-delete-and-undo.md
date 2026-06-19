@@ -21,7 +21,7 @@ tags: [安全, 错误恢复, 数据安全]
 
 - `removeDoc` 是即时 `fs.unlinkSync`(`src/core.ts`);TUI `/rm` 与 CLI 删除**不二次确认**(`src/commands.ts`)。
 - 结合 F08 揭示的"vault 从不 commit",**删掉一篇没提交过的文档 = 永久丢失**,git 也救不回。
-- `addDoc`/`writeDoc` 用 `writeFileSync(dest)` **静默覆盖同名旧文件**(`core.ts`、`core.ts`):导入或重名归档可能悄悄盖掉已有内容。
+- `addDoc`/`writeDoc` 用 `writeFileSync(dest)` **静默覆盖同名旧文件**(`core.ts`):导入或重名归档可能悄悄盖掉已有内容。
 - `moveDoc` 同理可覆盖目标(`core.ts`)。
 
 > 一句话总结风险:**删除不可逆、覆盖无提示**。这是用户对工具"敢不敢放心用"的底线问题。

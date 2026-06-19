@@ -2,11 +2,12 @@
 title: F16 · 阅读视图增强(大纲跳转 + 渲染主题)
 type: plan
 owner: PM
-status: proposed
+status: done
 priority: P1
 effort: M
 round: R4
 created: 2026-06-17
+completed: 2026-06-18
 tags: [阅读, tui, 渲染]
 ---
 
@@ -59,11 +60,11 @@ R1 让"打开"变顺了,但"读长文"仍原始:
 
 ## 验收标准
 
-- [ ] 阅读时 `o` 唤出大纲,Enter 跳到对应标题行。
-- [ ] `docky open --toc` 顶部打印目录。
-- [ ] 渲染宽度/主题可配并生效(无配置时与当前默认一致)。
-- [ ] `src/outline.ts` 标题抽取有单测(含代码块内 `#` 不误判)。
-- [ ] 作用域隔离不变(仍经 `core.readDoc`/`safePath`)。
+- [x] 阅读时 `o` 唤出大纲,Enter 跳到对应标题行。
+- [x] `docky open --toc` 顶部打印目录。
+- [x] 渲染宽度/主题可配并生效(无配置时与当前默认一致)。
+- [x] `src/outline.ts` 标题抽取有单测(含代码块内 `#` 不误判)。
+- [x] 作用域隔离不变(仍经 `core.readDoc`/`safePath`)。
 
 ## 衡量指标
 
@@ -80,3 +81,16 @@ R1 让"打开"变顺了,但"读长文"仍原始:
 - **复用已交付 F01** 的 `pageDoc` 行跳转与选择交互。
 - **为 F17 导出**提供共享的"渲染 + 大纲"模块。
 - 渲染偏好由 **F18 配置**统一管理。
+
+## 实现记录
+
+- done — 2026-06-18 实现并通过测试(187/187)。
+  - `src/outline.ts`(新增,纯函数):`extractHeadings(md) → [{level,title,line}]`(ATX `#`…`######`,**跳过 ``` / ~~~ 围栏代码块内的 `#`**,容忍行尾 `#`)+ `renderToc`(按相对层级缩进)。供 TUI/`--toc`/F17 复用。
+  - `src/types.ts` + `src/config.ts`:`Config.render { width?, theme: "dark"|"none" }`(默认 dark;为 F18 预留,无配置时与现状一致)。
+  - `src/pager.ts`:`renderMarkdown(src, { width?, theme? })`——`width` 经 marked-terminal reflow,`theme:"none"` 去除 ANSI 颜色;默认路径行为不变。
+  - `src/core.ts`:`renderPrefs(vault)` 读取配置渲染偏好。
+  - `src/tui.tsx`:新增 `mode === "outline"`——browse 中按 `o`(或 `/outline <rel>`)弹出大纲选择器,↑/↓ 选标题、Enter 复用 `pageDoc(proj, rel, line)` 跳到该标题行;阅读分页统一套用 `renderPrefs`。
+  - `src/cli.ts`:`docky open` 增 `--toc`(顶部目录)、`--width`、`--theme`。
+  - 作用域不变:大纲与阅读仍经 `core.readDoc`/`safePath`。
+  - 测试:`test/outline.test.ts`(标题抽取 + 行号、**围栏代码块内 `#` 不误判**、`~~~` 与行尾 `#`、renderToc 缩进、空大纲)+ `test/pager.test.ts`(theme none 去色、width 不抛)+ `test/tui.test.tsx`(`/outline` 弹大纲含行号)。CLI 实测 `open --toc --theme none`。
+  - 备注:大纲为独立 TUI 选择器(less 持有终端,无法在分页器内唤起),与 PM mock 的"读时按 o"等价由 browse 的 `o` 实现;Mermaid 等图形化留待 F17 HTML 导出(非目标)。

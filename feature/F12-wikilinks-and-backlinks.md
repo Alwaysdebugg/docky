@@ -2,11 +2,12 @@
 title: F12 · 文档互链与反向链接
 type: plan
 owner: PM
-status: proposed
+status: done
 priority: P1
 effort: M
 round: R3
 created: 2026-06-17
+completed: 2026-06-18
 tags: [知识图谱, 导航, 链接]
 ---
 
@@ -57,11 +58,11 @@ docky 的文档目前是**孤岛**,彼此无法关联:
 
 ## 验收标准
 
-- [ ] `[[type/name]]` 与 `[[name]]` 能被解析并模糊解析到正确文档。
-- [ ] 阅读视图列出可跳转的出链;反向链接正确展示。
-- [ ] 失效链接被标记;INDEX 汇总关系与失效项。
-- [ ] 链接解析严格限定在作用域内(越界目标视为失效,不泄漏其他项目)。
-- [ ] `src/links.ts` 有单测(解析、模糊解析、反链、失效)。
+- [x] `[[type/name]]` 与 `[[name]]` 能被解析并模糊解析到正确文档。
+- [x] 阅读视图列出可跳转的出链;反向链接正确展示。
+- [x] 失效链接被标记;INDEX 汇总关系与失效项。
+- [x] 链接解析严格限定在作用域内(越界目标视为失效,不泄漏其他项目)。
+- [x] `src/links.ts` 有单测(解析、模糊解析、反链、失效)。
 
 ## 衡量指标
 
@@ -78,3 +79,14 @@ docky 的文档目前是**孤岛**,彼此无法关联:
 - **复用已交付的 F02**(`src/match.ts`)做链接模糊解析、**F01**(`pageDoc`)做跳转。
 - **增强 F07**:出链/入链成为 agent 上下文包的高质量相关信号。
 - 与 **F13** 互补:F13 按内容相关性排序,F12 按显式引用关系连接。
+
+## 实现记录
+
+- done — 2026-06-18 实现并通过测试(159/159)。
+  - `src/links.ts`(新增,纯函数):`extractLinks`(解析 `[[...]]`,去重保序)、`resolveLink`(精确 rel → 文件名 → 标题 → 复用 F02 `match.fuzzy` 模糊解析,**仅在传入的 docs 内解析,越界目标即失效**)、`outlinksOf`、`buildBacklinks`(反链索引,忽略自引)。
+  - `src/core.ts`:`getLinks(vault, project, rel)` 读全项目正文,产出 `{outlinks, backlinks, broken}`;`generateIndex` 新增 `## 关系` 区块(逐文档出链)与 `## ⚠ 失效链接` 汇总。
+  - `src/tui.tsx`:`/open` 阅读视图在分页器底部追加"出链 → / 被引用 ← / ⚠ 失效"页脚;新增 `/links <rel>` 进入可选中列表(复用 browse,Enter 跳转出链/入链文档)。
+  - `src/commands.ts` / `src/cli.ts`:`/links` 与 `docky links <rel>`(打印出链/入链/失效)。
+  - 作用域:解析只在 `listDocs(project)` 范围内,跨项目/越界目标自然解析为 null(失效),不泄漏其他项目。
+  - 测试:`test/links.test.ts`(解析、四级解析、失效/越界、反链忽略自引、broken 标记)+ `test/core.test.ts`(getLinks 出/入/失效、INDEX 关系+失效区块)+ `test/tui.test.tsx`(`/links` 可跳转列表)。CLI 实测 `links` 与 INDEX 关系区块。
+  - 备注:阅读视图以页脚列出链接(less 无法做"输入序号跳转"),跳转能力由 `/links` 可选中列表提供;F07 上下文包接入出/入链作为信号留待后续(非本轮验收项)。

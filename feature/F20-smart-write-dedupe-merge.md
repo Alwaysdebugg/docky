@@ -2,11 +2,12 @@
 title: F20 · 智能写入(去重 / 合并 / 追加)
 type: plan
 owner: PM
-status: proposed
+status: done
 priority: P0
 effort: M
 round: R4
 created: 2026-06-17
+completed: 2026-06-18
 tags: [agent, mcp, 写入, 数据质量]
 ---
 
@@ -62,11 +63,11 @@ tags: [agent, mcp, 写入, 数据质量]
 
 ## 验收标准
 
-- [ ] 写入前进行相似性检测,命中近似时返回候选 + 相似度 + 建议动作(不静默执行)。
-- [ ] `mode=append` 以带时间戳小节安全追加;`mode=replace` 才覆盖。
-- [ ] `merge` 返回可读的合并建议(保留双方、标差异)。
-- [ ] 人类侧 `add`/`write` 行为不变(由 F10 负责);agent 侧写入受本特性约束。
-- [ ] `findSimilar`/`appendDoc` 有单测;作用域隔离与 F08 提交不受影响。
+- [x] 写入前进行相似性检测,命中近似时返回候选 + 相似度 + 建议动作(不静默执行)。
+- [x] `mode=append` 以带时间戳小节安全追加;`mode=replace` 才覆盖。
+- [x] `merge` 返回可读的合并建议(保留双方、标差异)。
+- [x] 人类侧 `add`/`write` 行为不变(由 F10 负责);agent 侧写入受本特性约束。
+- [x] `findSimilar`/`appendDoc` 有单测;作用域隔离与 F08 提交不受影响。
 
 ## 衡量指标
 
@@ -83,3 +84,15 @@ tags: [agent, mcp, 写入, 数据质量]
 - **补齐写入侧最后一块**:F07 解决"读"、F10 解决"人类删/改"、F20 解决"agent 写"。
 - **复用 F13/`match.ts`** 做相似度、**F12** 做关系、**F08** 做可回溯提交。
 - 与 **F19 巡检** 呼应:F20 在写入端**预防**重复,F19 在存量端**发现**问题。
+
+## 实现记录
+
+- done — 2026-06-18 实现并通过测试(210/210)。
+  - `src/core.ts`:`textSimilarity`(字符 bigram Jaccard,免分词、兼容中英文)、`findSimilar(vault, project, {name,title,content})`(综合名称/标题/正文前缀相似度,阈值 0.3,best-first)、`appendDoc`(带时间戳 `## 追加 <ts>` 小节安全追加)、`mergePreview`(保留双方的可读合并预览,不自动合并)、`smartWrite(... mode)`:
+    - `new`(默认):命中同名或近似 → 返回 `duplicate_suspected{candidate, similarity, suggestion, hint}` **不静默写**;无冲突才写。
+    - `append`/`replace`/`merge` 为显式动作(append 追加、replace 覆盖、merge 返回 `merge_preview`)。
+  - `src/mcp.ts`:`write_doc` 增 `mode` 入参,改走 `smartWrite`,**默认不再静默覆盖/重复**;`scaffold`(F06)保留。
+  - 人类侧 `add`/`write` 行为不变(覆盖保护归 F10);写入成功经 F08 自动提交可回溯;作用域隔离不变。
+  - 测试:`test/core.test.ts`(textSimilarity 高/低、findSimilar 命中近似排除无关、appendDoc 时间戳小节保留原文、smartWrite new 无冲突写入 / 同名拒覆盖 / 异名近似也拒 / append·replace·merge 显式)。并经真实 MCP stdio 实测 `write_doc` 同名返回 duplicate_suspected(未覆盖)+ `mode=append` 追加。
+  - 备注:不做内容级 LLM 自动合并(给结构化建议 + 安全追加,真合并由调用方决定,非目标);相似度阈值保守,最终由 agent 据 similarity 决策。
+  - 加固(2026-06-18):`smartWrite` 的 `replace` 覆盖前先经 `backupOverwrite` 把旧内容备份进 `.trash`(与 F10 一致)→ 被覆盖的旧版可 `docky undo` 还原,覆盖不再不可逆;新增回归测试 "smartWrite 'replace' backs up the old content so undo restores it"(全量 238/238 绿)。至此 agent 写入的 **覆盖保护闭环**:同名/近似默认不写(`new`)→ 显式 `replace` 也可撤销。

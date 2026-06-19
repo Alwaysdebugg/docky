@@ -9,13 +9,17 @@ import path from "node:path";
 import React, { useEffect, useState } from "react";
 import { Box, Static, Text, render, useApp, useInput, useStdin, useStdout } from "ink";
 import TextInput from "ink-text-input";
-import { OutLine, executeCommand, parseListArgs, suggest } from "./commands.js";
+import { OutLine, executeCommand, parseListArgs, suggest, suggestArgs } from "./commands.js";
 import * as core from "./core.js";
 import { DocInfo, DOC_TYPES, DockyError, SearchHit } from "./types.js";
 import { colorizeDiff, openExternally, renderMarkdown, spawnPager } from "./pager.js";
 import { fuzzy } from "./match.js";
 import { Confidence, applyImport, planImport } from "./importer.js";
 import { SelectableItem, SelectableList } from "./components/SelectableList.js";
+import { Heading, extractHeadings } from "./outline.js";
+import { Issue, lintProject } from "./lint.js";
+import { GraphLine, buildGraph, graphLines } from "./graph.js";
+import { evalFolder, getFolder, listFolders } from "./savedsearch.js";
 
 function colorOf(level: OutLine["level"]): string | undefined {
   switch (level) {
@@ -93,11 +97,27 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
   );
   const [value, setValue] = useState("");
   const [selected, setSelected] = useState(0);
+  const [argSel, setArgSel] = useState(0);
   const [, setRedraw] = useState(0);
+  // REPL command history + arg completion (F14).
+  const [cmdHist, setCmdHist] = useState<string[]>([]);
+  const [histIdx, setHistIdx] = useState(-1); // -1 = editing current input
+  const [reverseNeedle, setReverseNeedle] = useState<string | null>(null);
 
   // Interactive selectors (entered via /list, /projects, /search, /o, /import).
   const [mode, setMode] = useState<
-    "repl" | "browse" | "projects" | "results" | "quickopen" | "import" | "confirm" | "batchInput"
+    | "repl"
+    | "browse"
+    | "projects"
+    | "results"
+    | "quickopen"
+    | "import"
+    | "confirm"
+    | "batchInput"
+    | "outline"
+    | "doctor"
+    | "inbox"
+    | "graph"
   >("repl");
   const [pendingRm, setPendingRm] = useState<string | null>(null);
   const [pendingRmList, setPendingRmList] = useState<string[] | null>(null);
@@ -119,6 +139,21 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
   const [quickDocs, setQuickDocs] = useState<DocInfo[]>([]);
   const [quickQuery, setQuickQuery] = useState("");
   const [quickSel, setQuickSel] = useState(0);
+  // Agent-output review inbox (F22).
+  const [inboxDocs, setInboxDocs] = useState<DocInfo[]>([]);
+  const [inboxSel, setInboxSel] = useState(0);
+  const [inboxSelected, setInboxSelected] = useState<Set<string>>(new Set());
+  // Relationship graph view (F23).
+  const [graphItems, setGraphItems] = useState<GraphLine[]>([]);
+  const [graphSel, setGraphSel] = useState(0);
+  // Doc-doctor issues (F19).
+  const [doctorIssues, setDoctorIssues] = useState<Issue[]>([]);
+  const [doctorSel, setDoctorSel] = useState(0);
+  // Reading-view outline / TOC (F16).
+  const [outlineHeadings, setOutlineHeadings] = useState<Heading[]>([]);
+  const [outlineSel, setOutlineSel] = useState(0);
+  const [outlineRel, setOutlineRel] = useState("");
+  const [outlineProj, setOutlineProj] = useState("");
   // Interactive import triage (F09).
   const [importItems, setImportItems] = useState<TriageItem[]>([]);
   const [importSel, setImportSel] = useState(0);
@@ -127,8 +162,17 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
   const [importDir, setImportDir] = useState("");
 
   const suggestions = suggest(value);
+  const argList = suggestions.length === 0 && value.startsWith("/") ? suggestArgs(vault, project, value) : [];
   const menuWidth = Math.min((process.stdout.columns || 80) - 4, 76);
   const sel = suggestions.length > 0 ? Math.min(selected, suggestions.length - 1) : 0;
+  const aSel = argList.length > 0 ? Math.min(argSel, argList.length - 1) : 0;
+  // Fixed-height scrolling viewport for the menus (F: keeps a long command list
+  // from overflowing). The window follows the cursor, keeping it ~centered.
+  const MENU_ROWS = Math.max(6, Math.min(16, (process.stdout.rows || 24) - 9));
+  const windowStart = (active: number, total: number): number =>
+    Math.min(Math.max(0, total - MENU_ROWS), Math.max(0, active - Math.floor((MENU_ROWS - 1) / 2)));
+  const cmdStart = windowStart(sel, suggestions.length);
+  const argStart = windowStart(aSel, argList.length);
 
   function append(lines: OutLine[]) {
     setHistory((h) => [...h, ...lines.map((l) => ({ ...l, key: LINE_KEY++ }))]);
@@ -176,9 +220,27 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
       append([{ text: "› " + rel, level: "in" }, { text: msg, level: "err" }]);
       return;
     }
-    const view = startLine ? content : renderMarkdown(content);
-    if (!runPager(view, startLine)) {
-      // no TTY: fall back to inline output
+    if (startLine) {
+      if (!runPager(content, startLine)) {
+        append([{ text: "› " + rel, level: "in" }, ...content.split("\n").map((t) => ({ text: t, level: "out" as const }))]);
+      }
+      return;
+    }
+    // Normal read: append an outlinks / backlinks footer (F12).
+    let footer = "";
+    try {
+      const links = core.getLinks(vault, proj, rel);
+      const parts: string[] = [];
+      const outs = links.outlinks.filter((o) => o.rel).map((o) => o.rel);
+      if (outs.length) parts.push(`**出链 →** ${outs.join(" · ")}`);
+      if (links.backlinks.length) parts.push(`**被引用 ←** ${links.backlinks.join(" · ")}`);
+      if (links.broken.length) parts.push(`**⚠ 失效 →** ${links.broken.map((b) => `[[${b}]]`).join(" · ")}`);
+      if (parts.length) footer = "\n\n---\n\n" + parts.join("\n\n") + "\n";
+    } catch {
+      /* links are best-effort */
+    }
+    const view = renderMarkdown(content + footer, core.renderPrefs(vault));
+    if (!runPager(view)) {
       append([{ text: "› " + rel, level: "in" }, ...view.split("\n").map((t) => ({ text: t, level: "out" as const }))]);
     }
   }
@@ -310,6 +372,168 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
     setMode("browse");
   }
 
+  /** Show the project relationship graph; Enter opens the selected node (F23). */
+  function enterGraph(): void {
+    if (!project) {
+      append([{ text: "› /graph", level: "in" }, { text: "当前没有选中项目,用 /use 切换。", level: "err" }]);
+      return;
+    }
+    const lines = graphLines(buildGraph(vault, project));
+    setGraphItems(lines);
+    setGraphSel(lines.findIndex((l) => l.rel) >= 0 ? lines.findIndex((l) => l.rel) : 0);
+    setMode("graph");
+  }
+
+  /** Open the agent-output review inbox (F22). */
+  function enterInbox(): void {
+    if (!project) {
+      append([{ text: "› /inbox", level: "in" }, { text: "当前没有选中项目,用 /use 切换。", level: "err" }]);
+      return;
+    }
+    const pending = core.listPending(vault, project);
+    if (pending.length === 0) {
+      append([{ text: "› /inbox", level: "in" }, { text: "收件箱为空(无待审文档)", level: "info" }]);
+      return;
+    }
+    setInboxDocs(pending);
+    setInboxSel(0);
+    setInboxSelected(new Set());
+    setMode("inbox");
+  }
+
+  function inboxTargets(): string[] {
+    if (inboxSelected.size > 0) return [...inboxSelected];
+    const d = inboxDocs[inboxSel];
+    return d ? [d.rel] : [];
+  }
+
+  /** Re-read pending docs after an inbox action; exit to REPL when emptied. */
+  function refreshInbox(summary: OutLine): void {
+    append([summary]);
+    if (!project) {
+      setMode("repl");
+      return;
+    }
+    const pending = core.listPending(vault, project);
+    setInboxSelected(new Set());
+    if (pending.length === 0) {
+      setMode("repl");
+      return;
+    }
+    setInboxDocs(pending);
+    setInboxSel((s) => Math.min(s, pending.length - 1));
+  }
+
+  function approveInbox(): void {
+    if (!project) return;
+    const rels = inboxTargets();
+    let n = 0;
+    for (const rel of rels) {
+      try {
+        core.setReview(vault, project, rel, "approved");
+        n++;
+      } catch {
+        /* skip */
+      }
+    }
+    refreshInbox({ text: `已通过 ${n} 篇`, level: "ok" });
+  }
+
+  function returnInbox(): void {
+    if (!project) return;
+    const rels = inboxTargets();
+    let n = 0;
+    for (const rel of rels) {
+      try {
+        core.removeDoc(vault, project, rel);
+        n++;
+      } catch {
+        /* skip */
+      }
+    }
+    refreshInbox({ text: `已退回 ${n} 篇(移入 .trash,可 /undo)`, level: "ok" });
+  }
+
+  /** Run the doc-doctor and show issues; Enter jumps to the doc (F19). */
+  function enterDoctor(): void {
+    if (!project) {
+      append([{ text: "› /doctor", level: "in" }, { text: "当前没有选中项目,用 /use 切换。", level: "err" }]);
+      return;
+    }
+    const issues = lintProject(vault, project);
+    if (issues.length === 0) {
+      append([{ text: "› /doctor", level: "in" }, { text: "✓ 文档库健康,无问题", level: "ok" }]);
+      return;
+    }
+    setDoctorIssues(issues);
+    setDoctorSel(0);
+    setMode("doctor");
+  }
+
+  /** Pop the outline (TOC) for a doc; Enter jumps to a heading's line (F16). */
+  function enterOutline(proj: string, rel: string): void {
+    let content: string;
+    try {
+      content = core.readDoc(vault, proj, rel);
+    } catch (e) {
+      const msg = e instanceof DockyError ? e.message : `错误: ${(e as Error).message}`;
+      append([{ text: "› /outline " + rel, level: "in" }, { text: msg, level: "err" }]);
+      return;
+    }
+    const headings = extractHeadings(content);
+    if (headings.length === 0) {
+      append([{ text: "› /outline " + rel, level: "in" }, { text: "(无标题大纲)", level: "info" }]);
+      return;
+    }
+    setOutlineHeadings(headings);
+    setOutlineSel(0);
+    setOutlineRel(rel);
+    setOutlineProj(proj);
+    setMode("outline");
+  }
+
+  /** Enter a selectable list of a doc's outlinks + backlinks for jumping (F12). */
+  function enterLinks(rel: string): void {
+    if (!project) {
+      append([{ text: "› /links", level: "in" }, { text: "当前没有选中项目,用 /use 切换。", level: "err" }]);
+      return;
+    }
+    let links;
+    try {
+      links = core.getLinks(vault, project, rel);
+    } catch (e) {
+      const msg = e instanceof DockyError ? e.message : `错误: ${(e as Error).message}`;
+      append([{ text: "› /links " + rel, level: "in" }, { text: msg, level: "err" }]);
+      return;
+    }
+    const byRel = new Map(core.listDocs(vault, project).map((d) => [d.rel, d]));
+    const outRels = links.outlinks.filter((o) => o.rel).map((o) => o.rel as string);
+    const ordered: DocInfo[] = [];
+    const seen = new Set<string>();
+    for (const r of [...outRels, ...links.backlinks]) {
+      if (seen.has(r)) continue;
+      const d = byRel.get(r);
+      if (d) {
+        ordered.push(d);
+        seen.add(r);
+      }
+    }
+    if (ordered.length === 0) {
+      const note = links.broken.length ? `(无可跳转链接;⚠ 失效 ${links.broken.length})` : "(无链接)";
+      append([{ text: "› /links " + rel, level: "in" }, { text: note, level: "info" }]);
+      return;
+    }
+    setBrowseDocs(ordered);
+    setBrowseSel(0);
+    setBrowseSelected(new Set());
+    setBrowseTitle(
+      `🔗 ${rel} · 出链 ${outRels.length} / 入链 ${links.backlinks.length}${
+        links.broken.length ? ` · ⚠${links.broken.length}` : ""
+      }`
+    );
+    setMode("browse");
+  }
+
   /** Rels targeted by a batch action: the multi-selection, else the cursor. */
   function batchRels(): string[] {
     if (browseSelected.size > 0) return [...browseSelected];
@@ -364,11 +588,13 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
   /** Enter the interactive search-results selector (F01). `args` may lead with
    *  `-t <type>` to scope the search to a single document type. */
   function enterResults(args: string[]): void {
+    const fuzzy = args.includes("--fuzzy");
+    const across = args.includes("--across");
+    let rest = args.filter((a) => a !== "--fuzzy" && a !== "--across");
     let type: string | undefined;
-    let rest = args;
-    if (args[0] === "-t" && args[1]) {
-      type = args[1];
-      rest = args.slice(2);
+    if (rest[0] === "-t" && rest[1]) {
+      type = rest[1];
+      rest = rest.slice(2);
     }
     const query = rest.join(" ").trim();
     const echo = "› /search " + args.join(" ");
@@ -377,12 +603,14 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
       return;
     }
     if (!query) {
-      append([{ text: echo, level: "in" }, { text: "用法: /search [-t 类型] <关键词>", level: "err" }]);
+      append([{ text: echo, level: "in" }, { text: "用法: /search [-t 类型] [--fuzzy] [--across] <关键词>", level: "err" }]);
       return;
     }
     let hits: SearchHit[];
     try {
-      hits = core.searchDocs(vault, project, query, type);
+      hits = across
+        ? core.searchAcross(vault, project, query, { type, fuzzy })
+        : core.searchDocs(vault, project, query, type, {}, { fuzzy });
     } catch (e) {
       const msg = e instanceof DockyError ? e.message : `错误: ${(e as Error).message}`;
       append([{ text: echo, level: "in" }, { text: msg, level: "err" }]);
@@ -394,7 +622,9 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
     }
     setResultHits(hits);
     setResultSel(0);
-    setResultTitle(`search: ${query}${type ? " · " + type : ""}  (${hits.length} 命中)`);
+    setResultTitle(
+      `search: ${query}${type ? " · " + type : ""}${fuzzy ? " · fuzzy" : ""}${across ? " · across↗" : ""}  (按相关性 · ${hits.length} 命中)`
+    );
     setMode("results");
   }
 
@@ -427,6 +657,29 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
     setQuickQuery(initial);
     setQuickSel(0);
     setMode("quickopen");
+  }
+
+  /** Open a saved smart folder, evaluated live, as a selectable list (F24). */
+  function enterFolder(name: string): void {
+    if (!project) {
+      append([{ text: "› /f", level: "in" }, { text: "当前没有选中项目,用 /use 切换。", level: "err" }]);
+      return;
+    }
+    const query = getFolder(vault, project, name);
+    if (query === null) {
+      append([{ text: "› /f " + name, level: "in" }, { text: `没有名为「${name}」的智能文件夹`, level: "err" }]);
+      return;
+    }
+    const docs = evalFolder(vault, project, query);
+    if (docs.length === 0) {
+      append([{ text: "› /f " + name, level: "in" }, { text: `📂 ${name}(${query})— 无匹配`, level: "info" }]);
+      return;
+    }
+    setBrowseDocs(docs);
+    setBrowseSel(0);
+    setBrowseSelected(new Set());
+    setBrowseTitle(`📂 ${name} · ${query}  (${docs.length} 篇)`);
+    setMode("browse");
   }
 
   /** Enter a selectable list of pinned + recently-opened docs (F04). */
@@ -570,7 +823,24 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
     setValue("");
   }
 
+  /** Record a submitted command into history (F14): in-memory + persisted. */
+  function pushHist(raw: string): void {
+    const c = raw.trim();
+    if (!c) return;
+    setCmdHist((h) => (h[h.length - 1] === c ? h : [...h, c]));
+    if (project) {
+      try {
+        core.pushHistory(vault, project, c);
+      } catch {
+        /* best-effort */
+      }
+    }
+    setHistIdx(-1);
+    setReverseNeedle(null);
+  }
+
   function runRaw(raw: string) {
+    pushHist(raw);
     const body = raw.trim().replace(/^\//, "");
     const [c, ...a] = body.split(/\s+/);
     if (c.toLowerCase() === "open" && a[0]) {
@@ -600,6 +870,37 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
     }
     if (c.toLowerCase() === "recent") {
       enterRecent();
+      setValue("");
+      return;
+    }
+    if (c.toLowerCase() === "f" && a[0]) {
+      enterFolder(a[0]);
+      setValue("");
+      return;
+    }
+    if (c.toLowerCase() === "links" && a[0]) {
+      enterLinks(a[0]);
+      setValue("");
+      return;
+    }
+    if (c.toLowerCase() === "outline" && a[0]) {
+      if (project) enterOutline(project, a[0]);
+      else append([{ text: "› /outline", level: "in" }, { text: "当前没有选中项目,用 /use 切换。", level: "err" }]);
+      setValue("");
+      return;
+    }
+    if (c.toLowerCase() === "doctor") {
+      enterDoctor();
+      setValue("");
+      return;
+    }
+    if (c.toLowerCase() === "inbox") {
+      enterInbox();
+      setValue("");
+      return;
+    }
+    if (c.toLowerCase() === "graph") {
+      enterGraph();
       setValue("");
       return;
     }
@@ -680,17 +981,87 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
       else if (key.downArrow) setResultSel((s) => Math.min(resultHits.length - 1, s + 1));
       else if (key.return) {
         const h = resultHits[resultSel];
-        if (h && project) openDoc(project, h.rel, h.line || undefined);
+        if (h && project) openDoc(h.project ?? project, h.rel, h.line || undefined);
       } else if (input === "e") {
         const h = resultHits[resultSel];
         if (h && project) {
           try {
-            openExternally(core.safePath(vault, project, h.rel), h.line || undefined);
+            openExternally(core.safePath(vault, h.project ?? project, h.rel), h.line || undefined);
             append([{ text: `已用编辑器打开 ${h.rel}${h.line ? ":" + h.line : ""}`, level: "ok" }]);
           } catch (e) {
             append([{ text: `错误: ${(e as Error).message}`, level: "err" }]);
           }
         }
+      } else if (key.escape || input === "q") {
+        setMode("repl");
+      }
+      return;
+    }
+    // Relationship graph (F23): navigate nodes, Enter opens the doc.
+    if (mode === "graph") {
+      if (key.upArrow) setGraphSel((s) => Math.max(0, s - 1));
+      else if (key.downArrow) setGraphSel((s) => Math.min(graphItems.length - 1, s + 1));
+      else if (key.return) {
+        const it = graphItems[graphSel];
+        if (it && it.rel && project) {
+          setMode("repl");
+          openDoc(project, it.rel);
+        }
+      } else if (key.escape || input === "q") {
+        setMode("repl");
+      }
+      return;
+    }
+    // Review inbox (F22): preview / approve / return, single or multi-select.
+    if (mode === "inbox") {
+      if (key.upArrow) setInboxSel((s) => Math.max(0, s - 1));
+      else if (key.downArrow) setInboxSel((s) => Math.min(inboxDocs.length - 1, s + 1));
+      else if (input === " ") {
+        const d = inboxDocs[inboxSel];
+        if (d)
+          setInboxSelected((sel) => {
+            const n = new Set(sel);
+            n.has(d.rel) ? n.delete(d.rel) : n.add(d.rel);
+            return n;
+          });
+      } else if (input === "a") setInboxSelected(new Set(inboxDocs.map((d) => d.rel)));
+      else if (key.return) {
+        const d = inboxDocs[inboxSel];
+        if (d && project) openDoc(project, d.rel);
+      } else if (input === "y") approveInbox();
+      else if (input === "x") returnInbox();
+      else if (input === "e") {
+        const d = inboxDocs[inboxSel];
+        if (d) {
+          openExternally(d.path);
+          append([{ text: `已用编辑器打开 ${d.rel}`, level: "ok" }]);
+        }
+      } else if (key.escape || input === "q") setMode("repl");
+      return;
+    }
+    // Doc-doctor issue list (F19): Enter jumps to the offending doc.
+    if (mode === "doctor") {
+      if (key.upArrow) setDoctorSel((s) => Math.max(0, s - 1));
+      else if (key.downArrow) setDoctorSel((s) => Math.min(doctorIssues.length - 1, s + 1));
+      else if (key.return) {
+        const it = doctorIssues[doctorSel];
+        if (it && it.rel && project) {
+          setMode("repl");
+          openDoc(project, it.rel);
+        }
+      } else if (key.escape || input === "q") {
+        setMode("repl");
+      }
+      return;
+    }
+    // Outline / TOC navigation (F16): Enter jumps to the heading's line.
+    if (mode === "outline") {
+      if (key.upArrow) setOutlineSel((s) => Math.max(0, s - 1));
+      else if (key.downArrow) setOutlineSel((s) => Math.min(outlineHeadings.length - 1, s + 1));
+      else if (key.return) {
+        const h = outlineHeadings[outlineSel];
+        setMode("repl");
+        if (h) openDoc(outlineProj, outlineRel, h.line);
       } else if (key.escape || input === "q") {
         setMode("repl");
       }
@@ -801,6 +1172,10 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
           openExternally(d.path);
           append([{ text: `已用默认应用打开 ${d.rel}`, level: "ok" }]);
         }
+      } else if (input === "o") {
+        // o = pop the outline / TOC for the selected doc (F16).
+        const d = browseDocs[browseSel];
+        if (d) enterOutline(d.project, d.rel);
       } else if (input === "h") {
         // h = show this doc's commit history timeline (F08).
         const d = browseDocs[browseSel];
@@ -836,16 +1211,79 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
       }
       return;
     }
-    // Command menu navigation.
-    if (suggestions.length === 0) return;
-    if (key.downArrow) setSelected((s) => Math.min(s + 1, suggestions.length - 1));
-    else if (key.upArrow) setSelected((s) => Math.max(s - 1, 0));
-    else if (key.tab) {
-      // Tab completes the highlighted command (then awaits args, if any).
-      setValue(`/${suggestions[sel].name} `);
-      setSelected(0);
+    // Command-word menu navigation.
+    if (suggestions.length > 0) {
+      if (key.downArrow) setSelected((s) => Math.min(s + 1, suggestions.length - 1));
+      else if (key.upArrow) setSelected((s) => Math.max(s - 1, 0));
+      else if (key.tab) {
+        setValue(`/${suggestions[sel].name} `);
+        setSelected(0);
+      }
+      return;
     }
+    // Argument completion menu (F14): paths / types / statuses / projects.
+    if (argList.length > 0) {
+      if (key.downArrow) setArgSel((s) => Math.min(s + 1, argList.length - 1));
+      else if (key.upArrow) setArgSel((s) => Math.max(s - 1, 0));
+      else if (key.tab) completeArg(argList[aSel]);
+      return;
+    }
+    // Ctrl-R: reverse history search.
+    if (key.ctrl && input === "r") {
+      reverseSearch();
+      return;
+    }
+    // No menu open → ↑/↓ recall command history (F14).
+    if (key.upArrow) recallHistory(-1);
+    else if (key.downArrow) recallHistory(1);
   });
+
+  /** Replace the in-progress argument token with the chosen completion (F14). */
+  function completeArg(candidate: string): void {
+    if (/\s$/.test(value)) {
+      setValue(value + candidate + " ");
+    } else {
+      const parts = value.split(/\s+/);
+      parts[parts.length - 1] = candidate;
+      setValue(parts.join(" ") + " ");
+    }
+    setArgSel(0);
+  }
+
+  /** Recall command history: dir < 0 = older, dir > 0 = newer (F14). */
+  function recallHistory(dir: number): void {
+    if (cmdHist.length === 0) return;
+    if (dir < 0) {
+      const idx = histIdx < 0 ? cmdHist.length - 1 : Math.max(0, histIdx - 1);
+      setHistIdx(idx);
+      setValue(cmdHist[idx]);
+    } else {
+      if (histIdx < 0) return;
+      const idx = histIdx + 1;
+      if (idx >= cmdHist.length) {
+        setHistIdx(-1);
+        setValue("");
+      } else {
+        setHistIdx(idx);
+        setValue(cmdHist[idx]);
+      }
+    }
+  }
+
+  /** Ctrl-R: step to the next older history entry containing the needle (F14). */
+  function reverseSearch(): void {
+    if (cmdHist.length === 0) return;
+    const needle = (reverseNeedle ?? value).trim();
+    const start = histIdx < 0 ? cmdHist.length - 1 : histIdx - 1;
+    for (let i = start; i >= 0; i--) {
+      if (!needle || cmdHist[i].includes(needle)) {
+        setReverseNeedle(needle);
+        setHistIdx(i);
+        setValue(cmdHist[i]);
+        return;
+      }
+    }
+  }
 
   // SelectableList items for browse mode (type headers + status/tags meta, F11).
   function browseItems(): SelectableItem[] {
@@ -860,13 +1298,15 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
     });
   }
 
-  // Items for interactive search results: grouped by type, `name:line` + snippet.
+  // Items for interactive search results: relevance-ordered, one row per doc,
+  // with score + multiple highlighted snippets (F13).
   function resultItems(): SelectableItem[] {
     return resultHits.map((h, i) => {
-      const slash = h.rel.indexOf("/");
-      const type = slash >= 0 ? h.rel.slice(0, slash) : h.rel;
-      const name = slash >= 0 ? h.rel.slice(slash + 1) : h.rel;
-      return { id: `${h.rel}:${h.line}:${i}`, group: `${type}/`, label: h.line ? `${name}:${h.line}` : name, meta: h.snippet };
+      const snips = h.snippets.map((s) => (s.line ? `L${s.line} ${s.text}` : s.text)).join("  ");
+      const loc = h.line ? `${h.rel}:${h.line}` : h.rel;
+      // Cross-project (granted, read-only) hits are tagged with ↗ (F15).
+      const tag = h.project && h.project !== project ? `[${h.project}↗] ` : "";
+      return { id: `${h.project ?? ""}:${h.rel}:${i}`, label: `${tag}${loc}`, meta: `★${h.score} ${snips}` };
     });
   }
 
@@ -911,8 +1351,15 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
     return projNames.map((name) => ({ id: name, label: name, meta: (meta[name]?.paths ?? []).join(", ") || undefined }));
   }
 
-  // F09: if launched with `docky import -i`, jump straight into triage.
+  // Mount: seed command history (F14) and optionally jump into import (F09).
   useEffect(() => {
+    if (project) {
+      try {
+        setCmdHist(core.loadHistory(vault, project));
+      } catch {
+        /* history is best-effort */
+      }
+    }
     if (initialImport) enterImport([initialImport.dir, ...(initialImport.tags ?? []).map((t) => "#" + t)]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -923,7 +1370,8 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
   const atHome = mode === "repl" && value === "" && suggestions.length === 0 && history.length <= 1;
   const homePins = atHome && project ? core.getPins(vault, project) : [];
   const homeRecents = atHome && project ? core.getRecents(vault, project) : [];
-  const showHome = homePins.length > 0 || homeRecents.length > 0;
+  const homeFolders = atHome && project ? listFolders(vault, project) : [];
+  const showHome = homePins.length > 0 || homeRecents.length > 0 || homeFolders.length > 0;
   // Onboarding / self-heal card when there's no active project (F05).
   const scope = atHome && !project ? core.detectScope(vault, process.cwd()) : null;
 
@@ -949,7 +1397,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
           </Text>
           <SelectableList items={browseItems()} activeIndex={browseSel} selected={browseSelected} />
           <Box marginTop={1}>
-            <Text dimColor>Space 选 · a 全选 · A 反选 · m 移动 · d 删除 · # 打标 · s 状态 · Enter 预览 · h 历史 · Esc 返回</Text>
+            <Text dimColor>Space 选 · a 全选 · m 移动 · d 删除 · # 标 · s 状态 · Enter 预览 · o 大纲 · h 历史 · Esc 返回</Text>
           </Box>
         </Box>
       ) : mode === "projects" ? (
@@ -1000,6 +1448,75 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
           {importRows()}
           <Box marginTop={1}>
             <Text dimColor>↑/↓ · Space 勾选 · t 改类 · s 跳过 · p 预览 · m copy/move · a 应用 · Esc 退出</Text>
+          </Box>
+        </Box>
+      ) : mode === "graph" ? (
+        <Box flexDirection="column" marginTop={1}>
+          <Text color="cyan">{project} · 关系图谱</Text>
+          <SelectableList
+            items={graphItems.map((l, i) => ({
+              id: `${i}`,
+              label: l.label,
+            }))}
+            activeIndex={graphSel}
+          />
+          <Box marginTop={1}>
+            <Text dimColor>↑/↓ 选择 · Enter 打开节点 · Esc/q 返回</Text>
+          </Box>
+        </Box>
+      ) : mode === "inbox" ? (
+        <Box flexDirection="column" marginTop={1}>
+          <Text color="cyan">
+            收件箱 · {project} ({inboxDocs.length} 篇待审 · agent 产出)
+            {inboxSelected.size > 0 ? `  · 已选 ${inboxSelected.size}` : ""}
+          </Text>
+          <SelectableList
+            items={inboxDocs.map((d) => ({
+              id: d.rel,
+              group: `${d.type}/`,
+              label: d.name,
+              meta: `${d.source ?? "agent"} · ${d.title}`,
+            }))}
+            activeIndex={inboxSel}
+            selected={inboxSelected}
+          />
+          <Box marginTop={1}>
+            <Text dimColor>Space 选 · a 全选 · Enter 预览 · y 通过 · x 退回 · e 编辑 · Esc 返回</Text>
+          </Box>
+        </Box>
+      ) : mode === "doctor" ? (
+        <Box flexDirection="column" marginTop={1}>
+          <Text color="cyan">
+            体检报告 ({doctorIssues.filter((i) => i.severity === "error").length} error ·{" "}
+            {doctorIssues.filter((i) => i.severity === "warn").length} warn ·{" "}
+            {doctorIssues.filter((i) => i.severity === "info").length} info)
+          </Text>
+          <SelectableList
+            items={doctorIssues.map((it, i) => ({
+              id: `${i}`,
+              marker: it.severity === "error" ? "✗ " : it.severity === "warn" ? "⚠ " : "ℹ ",
+              label: `${it.rel ?? "(vault)"} — ${it.message}`,
+              meta: `→ ${it.fix}`,
+            }))}
+            activeIndex={doctorSel}
+          />
+          <Box marginTop={1}>
+            <Text dimColor>↑/↓ 选择 · Enter 跳到文档 · Esc/q 返回 · 修复用 docky doctor --fix</Text>
+          </Box>
+        </Box>
+      ) : mode === "outline" ? (
+        <Box flexDirection="column" marginTop={1}>
+          <Text color="cyan">大纲 · {outlineRel}</Text>
+          <SelectableList
+            items={outlineHeadings.map((h, i) => ({
+              id: `${i}`,
+              label: `${"  ".repeat(Math.max(0, h.level - 1))}${h.title}`,
+              meta: `L${h.line}`,
+            }))}
+            activeIndex={outlineSel}
+          />
+          <Box marginTop={1}>
+            <Text dimColor>↑/↓ 选择 · Enter 跳到该标题行 · Esc/q 返回</Text>
           </Box>
         </Box>
       ) : mode === "quickopen" ? (
@@ -1084,7 +1601,10 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
                   {"  " + r}
                 </Text>
               ))}
-              <Text dimColor>{"/recent 选择打开 · /pin <路径> 置顶"}</Text>
+              {homeFolders.length > 0 && (
+                <Text color="yellow">{"📂 智能文件夹  " + homeFolders.map((f) => f.name).join(" · ")}</Text>
+              )}
+              <Text dimColor>{"/recent 打开 · /f <名称> 智能文件夹 · /pin <路径> 置顶"}</Text>
             </Box>
           )}
           <Box marginTop={1}>
@@ -1095,30 +1615,58 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
               onChange={(v) => {
                 setValue(v.replace(/\t/g, ""));
                 setSelected(0);
+                setArgSel(0);
+                setHistIdx(-1);
+                setReverseNeedle(null);
               }}
               onSubmit={onSubmit}
-              placeholder="输入命令,/ 看菜单"
+              placeholder="输入命令,/ 看菜单 · ↑ 历史"
             />
           </Box>
 
           {suggestions.length > 0 && (
             <Box flexDirection="column" marginLeft={2}>
-              {suggestions.map((s, i) => (
-                <Box key={s.name} width={menuWidth} justifyContent="space-between">
-                  <Text color={i === sel ? "cyanBright" : "gray"}>
-                    {i === sel ? "▸ " : "  "}
-                    {s.usage}
-                  </Text>
-                  <Text color={i === sel ? "cyan" : "gray"} dimColor={i !== sel}>
-                    {s.desc}
-                  </Text>
-                </Box>
-              ))}
+              {cmdStart > 0 && <Text dimColor>{`  ▲ 还有 ${cmdStart} 项`}</Text>}
+              {suggestions.slice(cmdStart, cmdStart + MENU_ROWS).map((s, i) => {
+                const idx = cmdStart + i;
+                return (
+                  <Box key={s.name} width={menuWidth} justifyContent="space-between">
+                    <Text color={idx === sel ? "cyanBright" : "gray"}>
+                      {idx === sel ? "▸ " : "  "}
+                      {s.usage}
+                    </Text>
+                    <Text color={idx === sel ? "cyan" : "gray"} dimColor={idx !== sel}>
+                      {s.desc}
+                    </Text>
+                  </Box>
+                );
+              })}
+              {cmdStart + MENU_ROWS < suggestions.length && (
+                <Text dimColor>{`  ▼ 还有 ${suggestions.length - cmdStart - MENU_ROWS} 项 · ${sel + 1}/${suggestions.length}`}</Text>
+              )}
             </Box>
           )}
 
-          <Box marginTop={suggestions.length > 0 ? 0 : 1}>
-            <Text dimColor>↑/↓ 选择 · Tab 补全 · Enter 执行 · /exit 退出</Text>
+          {suggestions.length === 0 && argList.length > 0 && (
+            <Box flexDirection="column" marginLeft={2}>
+              {argStart > 0 && <Text dimColor>{`  ▲ 还有 ${argStart} 项`}</Text>}
+              {argList.slice(argStart, argStart + MENU_ROWS).map((a, i) => {
+                const idx = argStart + i;
+                return (
+                  <Text key={a} color={idx === aSel ? "cyanBright" : "gray"}>
+                    {idx === aSel ? "▸ " : "  "}
+                    {a}
+                  </Text>
+                );
+              })}
+              {argStart + MENU_ROWS < argList.length && (
+                <Text dimColor>{`  ▼ 还有 ${argList.length - argStart - MENU_ROWS} 项 · ${aSel + 1}/${argList.length}`}</Text>
+              )}
+            </Box>
+          )}
+
+          <Box marginTop={suggestions.length > 0 || argList.length > 0 ? 0 : 1}>
+            <Text dimColor>↑/↓ 选择/历史 · Tab 补全参数 · Ctrl-R 反搜 · Enter 执行</Text>
           </Box>
         </>
       )}

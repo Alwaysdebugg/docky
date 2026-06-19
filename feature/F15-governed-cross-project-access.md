@@ -2,11 +2,12 @@
 title: F15 · 跨项目授权检索与引用
 type: plan
 owner: PM
-status: proposed
+status: done
 priority: P1
 effort: M
 round: R3
 created: 2026-06-17
+completed: 2026-06-18
 tags: [作用域, 授权, agent, 检索]
 ---
 
@@ -60,11 +61,11 @@ svc-a  →  platform:design (只读), svc-b (只读)
 
 ## 验收标准
 
-- [ ] 默认无 grant 时,行为与今天**完全一致**(全隔离),既有隔离单测不破。
-- [ ] 配置 grant 后,`--across`/`get_context(scopes)` 可只读检索被授权项目,结果带来源标签。
-- [ ] 任何写操作均不跨项目;`../` 穿越仍被 `safePath` 拒绝。
-- [ ] `docky grants` 可审计;授权变更可追溯(F08 提交)。
-- [ ] 跨项目检索/解析有单测,含"未授权不可见"的负向用例。
+- [x] 默认无 grant 时,行为与今天**完全一致**(全隔离),既有隔离单测不破。
+- [x] 配置 grant 后,`--across`/`get_context(scopes)` 可只读检索被授权项目,结果带来源标签。
+- [x] 任何写操作均不跨项目;`../` 穿越仍被 `safePath` 拒绝。
+- [x] `docky grants` 可审计;授权变更可追溯(F08 提交)。
+- [x] 跨项目检索/解析有单测,含"未授权不可见"的负向用例。
 
 ## 衡量指标
 
@@ -80,3 +81,15 @@ svc-a  →  platform:design (只读), svc-b (只读)
 
 - 在 **F05/`safePath`** 的隔离保证之上做"受控开口",不破坏其语义。
 - 直接扩展 **F07**(上下文可跨授权域)、**F13**(跨域相关性排序)、**F12**(跨域链接)——R3 的边界扩展收口。
+
+## 实现记录
+
+- done — 2026-06-18 实现并通过测试(179/179,含负向用例)。
+  - `src/types.ts` + `src/config.ts`:`Config.grants: Record<项目, [目标...]>`(目标为 `other` 或 `other:type`),默认 `{}`(全隔离);`SearchHit` 增可选 `project`/`readonly` 用于来源标注。
+  - `src/core.ts`:`resolveScopes(vault, project)` 返回 [本项目(可写)+ 授权项目(只读、可类型级)],未知/非法/自授权一律丢弃;`addGrant`/`revokeGrant`/`listGrants`(写 config + F08 提交,可审计);`searchAcross` 对每个 scope **各自在其项目 safePath 内** 检索后合并、按相关性排序并打 `project`/`readonly` 标签;`buildContext({across})` 在授权范围内聚合跨项目只读条目(标 `project`,note 注明)。**写路径(add/write/mv/rm)从不查 scopes**,`../` 仍被 `safePath` 硬拒。
+  - `src/cli.ts`:`docky grant/revoke/grants` 与 `search --across`(来源标签 `[proj]` / `[proj↗]`)。
+  - `src/tui.tsx`:`/search --across`(结果按来源打 `[proj↗]` 标签、Enter 在来源项目只读打开)、`/grant`、`/revoke`、`/grants`。
+  - `src/mcp.ts`:`search_docs`/`get_context` 增 `across`,**授权在服务端/核心层强制**(客户端无法自带 scope 越权)。
+  - 安全语义:默认无 grant 时行为与之前完全一致(既有隔离单测全过);跨界只读、写永不跨、`../` 穿越仍拒。
+  - 测试:`test/core.test.ts`(默认全隔离、grant 后跨项目只读 + 来源标签、**未授权项目不可见(负向)**、类型级授权只暴露该类型、get_context across 聚合且排除未授权、审计/撤销、拒自授权/未知目标、**grant 不开放跨项目写/路径穿越**)。CLI 实测 grant 前后 `--across` 与 `grants` 审计,secret 始终不可见。
+  - 备注:F12 跨项目链接(`[[proj:type/name]]`)留待后续轮次;本轮覆盖跨项目检索/上下文聚合与全部安全验收。

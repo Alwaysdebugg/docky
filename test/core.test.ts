@@ -585,3 +585,231 @@ describe("batch operations (F11)", () => {
     expect(res.errors[0].rel).toBe("debug/ghost.md");
   });
 });
+
+describe("search relevance, snippets & highlight (F13)", () => {
+  beforeEach(() => core.registerProject(vault, "p", path.join(tmp, "p")));
+
+  it("ranks a title hit above a body-only hit", () => {
+    core.writeDoc(vault, "p", "design", "session-design", "# session design\nabout caching");
+    core.writeDoc(vault, "p", "debug", "misc", "# misc\nlost the session here once");
+    const hits = core.searchDocs(vault, "p", "session");
+    expect(hits[0].rel).toBe("design/session-design.md"); // title hit wins
+    expect(hits[0].score).toBeGreaterThan(hits[1].score);
+  });
+
+  it("returns multiple highlighted snippets per doc with line numbers", () => {
+    core.writeDoc(vault, "p", "design", "arch", "# arch\ncreate session cache\nlater\nsession expiry policy");
+    const hit = core.searchDocs(vault, "p", "session").find((h) => h.rel === "design/arch.md")!;
+    expect(hit.snippets.length).toBe(2);
+    expect(hit.snippets[0].line).toBe(2);
+    expect(hit.snippets[1].line).toBe(4);
+    expect(hit.snippets[0].text).toContain("「session」"); // hit highlighted
+  });
+
+  it("caps snippets per doc", () => {
+    core.writeDoc(vault, "p", "debug", "many", "# many\nx\n".concat("session\n".repeat(10)));
+    const hit = core.searchDocs(vault, "p", "session")[0];
+    expect(hit.snippets.length).toBeLessThanOrEqual(3);
+  });
+
+  it("excludes archived docs and supports type filtering", () => {
+    core.writeDoc(vault, "p", "debug", "live", "# live\nsession token");
+    core.writeDoc(vault, "p", "debug", "dead", "---\nstatus: archived\n---\n# dead\nsession token");
+    const hits = core.searchDocs(vault, "p", "session");
+    expect(hits.some((h) => h.rel === "debug/live.md")).toBe(true);
+    expect(hits.some((h) => h.rel === "debug/dead.md")).toBe(false);
+  });
+
+  it("fuzzy mode finds a doc by subsequence that exact misses", () => {
+    core.writeDoc(vault, "p", "design", "authentication", "# authentication flow\nbody");
+    expect(core.searchDocs(vault, "p", "authn")).toHaveLength(0); // exact: no match
+    const fz = core.searchDocs(vault, "p", "authn", undefined, {}, { fuzzy: true });
+    expect(fz.some((h) => h.rel === "design/authentication.md")).toBe(true);
+  });
+});
+
+describe("governed cross-project access (F15)", () => {
+  beforeEach(() => {
+    core.registerProject(vault, "svc-a", path.join(tmp, "svc-a"));
+    core.registerProject(vault, "platform", path.join(tmp, "platform"));
+    core.registerProject(vault, "secret", path.join(tmp, "secret"));
+    core.writeDoc(vault, "svc-a", "design", "gateway", "# gateway\n限流 design");
+    core.writeDoc(vault, "platform", "design", "ratelimit", "# ratelimit\n限流 规范");
+    core.writeDoc(vault, "platform", "debug", "note", "# note\n限流 debug note");
+    core.writeDoc(vault, "secret", "design", "leak", "# leak\n限流 机密");
+  });
+
+  it("defaults to full isolation: no grant = only own project", () => {
+    expect(core.resolveScopes(vault, "svc-a")).toEqual([{ project: "svc-a", readonly: false }]);
+    const hits = core.searchAcross(vault, "svc-a", "限流");
+    expect(hits.length).toBeGreaterThan(0);
+    expect(hits.every((h) => h.project === "svc-a")).toBe(true); // never another project
+  });
+
+  it("grant enables read-only cross search, tagged; ungranted stays invisible", () => {
+    core.addGrant(vault, "svc-a", "platform");
+    const hits = core.searchAcross(vault, "svc-a", "限流");
+    expect(hits.some((h) => h.project === "svc-a" && h.readonly === false)).toBe(true);
+    expect(hits.some((h) => h.project === "platform" && h.readonly === true)).toBe(true);
+    expect(hits.some((h) => h.project === "secret")).toBe(false); // NEGATIVE: ungranted unseen
+  });
+
+  it("type-scoped grant exposes only the granted type", () => {
+    core.addGrant(vault, "svc-a", "platform:design");
+    const hits = core.searchAcross(vault, "svc-a", "限流");
+    expect(hits.some((h) => h.project === "platform" && h.rel === "design/ratelimit.md")).toBe(true);
+    expect(hits.some((h) => h.project === "platform" && h.rel.startsWith("debug/"))).toBe(false);
+  });
+
+  it("get_context --across aggregates granted items, tagged; ungranted excluded", () => {
+    core.addGrant(vault, "svc-a", "platform");
+    const ctx = core.buildContext(vault, "svc-a", { query: "限流", across: true });
+    expect(ctx.items.some((i) => i.project === "platform")).toBe(true);
+    expect(ctx.items.some((i) => i.project === "secret")).toBe(false);
+    expect(ctx.note).toContain("跨项目");
+  });
+
+  it("grants are auditable and revocable", () => {
+    core.addGrant(vault, "svc-a", "platform:design");
+    expect(core.listGrants(vault)["svc-a"]).toEqual(["platform:design"]);
+    core.revokeGrant(vault, "svc-a", "platform:design");
+    expect(core.listGrants(vault)["svc-a"]).toBeUndefined();
+  });
+
+  it("rejects self-grant and unknown targets", () => {
+    expect(() => core.addGrant(vault, "svc-a", "svc-a")).toThrow();
+    expect(() => core.addGrant(vault, "svc-a", "nope")).toThrow();
+  });
+
+  it("a grant never enables cross-project writes or path traversal", () => {
+    core.addGrant(vault, "svc-a", "platform");
+    expect(() => core.readDoc(vault, "svc-a", "../platform/design/ratelimit.md")).toThrow(/escapes/);
+    expect(() => core.writeDoc(vault, "svc-a", "design", "../../platform/x", "# x")).toThrow(/escapes/);
+  });
+});
+
+describe("doc links & backlinks (F12)", () => {
+  beforeEach(() => core.registerProject(vault, "p", path.join(tmp, "p")));
+
+  it("computes outlinks, backlinks, and broken links in scope", () => {
+    core.writeDoc(vault, "p", "design", "auth", "# 鉴权改造\n见 [[debug/login]] 和 [[ghost-zzz]]");
+    core.writeDoc(vault, "p", "debug", "login", "# 登录排查\n参考 [[design/auth]]");
+    const a = core.getLinks(vault, "p", "design/auth.md");
+    expect(a.outlinks.find((o) => o.raw === "debug/login")!.rel).toBe("debug/login.md");
+    expect(a.broken).toContain("ghost-zzz");
+    expect(a.backlinks).toContain("debug/login.md");
+  });
+
+  it("INDEX includes a relationships section and flags broken links", () => {
+    core.writeDoc(vault, "p", "design", "auth", "# 鉴权改造\n见 [[debug/login]] 和 [[ghost-zzz]]");
+    core.writeDoc(vault, "p", "debug", "login", "# 登录排查\nbody");
+    const idx = fs.readFileSync(core.generateIndex(vault, "p"), "utf-8");
+    expect(idx).toContain("## 关系");
+    expect(idx).toContain("(design/auth.md) → debug/login.md");
+    expect(idx).toContain("## ⚠ 失效链接");
+    expect(idx).toContain("ghost-zzz");
+  });
+});
+
+describe("agent review inbox (F22)", () => {
+  beforeEach(() => core.registerProject(vault, "p", path.join(tmp, "p")));
+
+  it("stamps agent writes as source:agent / review:pending; human writes are not", () => {
+    core.smartWrite(vault, "p", "debug", "agentdoc", "# Agent Doc\nbody");
+    core.writeDoc(vault, "p", "design", "humandoc", "# Human Doc\nbody"); // human path
+    const agent = core.listDocs(vault, "p").find((d) => d.name === "agentdoc.md")!;
+    expect(agent.source).toBe("agent");
+    expect(agent.review).toBe("pending");
+    expect(core.listDocs(vault, "p").find((d) => d.name === "humandoc.md")!.review).toBeUndefined();
+  });
+
+  it("listPending returns only pending docs", () => {
+    core.smartWrite(vault, "p", "debug", "p1", "# Alpha\nlorem ipsum content here");
+    core.smartWrite(vault, "p", "debug", "p2", "# Beta\ntotally different words zzz");
+    core.writeDoc(vault, "p", "design", "h", "# H\nbody");
+    expect(core.listPending(vault, "p").map((d) => d.rel).sort()).toEqual(["debug/p1.md", "debug/p2.md"]);
+  });
+
+  it("setReview approved removes a doc from the inbox, preserving the body", () => {
+    core.smartWrite(vault, "p", "debug", "x", "# X\nimportant body");
+    expect(core.listPending(vault, "p").some((d) => d.rel === "debug/x.md")).toBe(true);
+    core.setReview(vault, "p", "debug/x.md", "approved");
+    expect(core.listPending(vault, "p").some((d) => d.rel === "debug/x.md")).toBe(false);
+    expect(core.listDocs(vault, "p").find((d) => d.name === "x.md")!.review).toBe("approved");
+    expect(core.readDoc(vault, "p", "debug/x.md")).toContain("important body");
+  });
+
+  it("setReview rejects an invalid state", () => {
+    core.smartWrite(vault, "p", "debug", "x", "# X");
+    expect(() => core.setReview(vault, "p", "debug/x.md", "maybe")).toThrow(/Invalid review/);
+  });
+});
+
+describe("smart write: dedupe / append / merge (F20)", () => {
+  beforeEach(() => core.registerProject(vault, "p", path.join(tmp, "p")));
+
+  it("textSimilarity scores near-identical high and unrelated low", () => {
+    expect(core.textSimilarity("登录排查", "登录排查")).toBe(1);
+    expect(core.textSimilarity("login debugging session", "login debug session")).toBeGreaterThan(0.5);
+    expect(core.textSimilarity("登录排查", "支付退款方案")).toBeLessThan(0.2);
+  });
+
+  it("findSimilar surfaces near-duplicates, not unrelated docs", () => {
+    core.writeDoc(vault, "p", "debug", "login-issue", "# 登录排查\nsession 丢失导致登录失败的排查记录");
+    core.writeDoc(vault, "p", "design", "payments", "# 支付设计\n退款流程方案");
+    const hits = core.findSimilar(vault, "p", { name: "登录排查", content: "# 登录排查\nsession 丢失导致登录失败的排查" });
+    expect(hits.some((h) => h.rel === "debug/login-issue.md")).toBe(true);
+    expect(hits.some((h) => h.rel === "design/payments.md")).toBe(false);
+  });
+
+  it("appendDoc appends a timestamped section, preserving the original", () => {
+    core.writeDoc(vault, "p", "debug", "x", "# X\noriginal body");
+    core.appendDoc(vault, "p", "debug/x.md", "new finding");
+    const content = core.readDoc(vault, "p", "debug/x.md");
+    expect(content).toContain("original body");
+    expect(content).toContain("## 追加");
+    expect(content).toContain("new finding");
+  });
+
+  it("smartWrite 'new' writes when there's no conflict", () => {
+    expect(core.smartWrite(vault, "p", "debug", "fresh", "# Fresh\nbody").status).toBe("written");
+    expect(core.listDocs(vault, "p").some((d) => d.name === "fresh.md")).toBe(true);
+  });
+
+  it("smartWrite 'new' refuses to silently overwrite a same-named doc", () => {
+    core.writeDoc(vault, "p", "debug", "x", "# X\noriginal");
+    const r = core.smartWrite(vault, "p", "debug", "x", "# X\nDIFFERENT");
+    expect(r.status).toBe("duplicate_suspected");
+    if (r.status === "duplicate_suspected") {
+      expect(r.candidate.rel).toBe("debug/x.md");
+      expect(r.candidate.similarity).toBe(1);
+    }
+    expect(core.readDoc(vault, "p", "debug/x.md")).toContain("original"); // NOT overwritten
+  });
+
+  it("smartWrite 'new' flags a near-duplicate that has a different name", () => {
+    core.writeDoc(vault, "p", "debug", "login-issue", "# 登录排查\nsession 丢失导致登录失败的详细排查记录");
+    const r = core.smartWrite(vault, "p", "debug", "session-issue", "# 登录排查\nsession 丢失导致登录失败的详细排查记录");
+    expect(r.status).toBe("duplicate_suspected");
+    if (r.status === "duplicate_suspected") expect(r.candidate.rel).toBe("debug/login-issue.md");
+  });
+
+  it("append / replace / merge are explicit modes", () => {
+    core.writeDoc(vault, "p", "debug", "x", "# X\noriginal");
+    expect(core.smartWrite(vault, "p", "debug", "x", "added note", "append").status).toBe("appended");
+    expect(core.readDoc(vault, "p", "debug/x.md")).toContain("added note");
+    expect(core.smartWrite(vault, "p", "debug", "x", "# X\nREPLACED", "replace").status).toBe("written");
+    expect(core.readDoc(vault, "p", "debug/x.md")).toContain("REPLACED");
+    const m = core.smartWrite(vault, "p", "debug", "x", "# X\nmerge candidate", "merge");
+    expect(m.status).toBe("merge_preview");
+    if (m.status === "merge_preview") expect(m.preview).toContain("REPLACED"); // existing side kept
+  });
+
+  it("smartWrite 'replace' backs up the old content so undo restores it", () => {
+    core.writeDoc(vault, "p", "debug", "x", "# X\noriginal content");
+    core.smartWrite(vault, "p", "debug", "x", "# X\nreplaced content", "replace");
+    expect(core.readDoc(vault, "p", "debug/x.md")).toContain("replaced content");
+    core.undo(vault, "p"); // F10 undo of the forced overwrite
+    expect(core.readDoc(vault, "p", "debug/x.md")).toContain("original content"); // restored
+  });
+});

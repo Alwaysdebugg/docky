@@ -21,6 +21,10 @@ export interface Config {
   /** Vault git auto-commit policy (F08): auto on every write, manual via
    *  `docky sync`, or off. */
   autocommit: AutocommitMode;
+  /** Read-only cross-project grants (F15): project → ["other", "other:type"]. */
+  grants: Record<string, string[]>;
+  /** Reading-view render preferences (F16; managed by F18 later). */
+  render: { width?: number; theme: "dark" | "none" };
 }
 
 export interface ProjectContext {
@@ -47,13 +51,24 @@ export interface DocInfo {
   tags: string[]; // from frontmatter; defaults to [] (F03)
   mtime: number; // file modified time (ms epoch)
   stale: boolean; // active design/plan past the stale threshold (F03)
+  source?: string; // "human" | "agent" — who wrote it (F22)
+  review?: string; // "pending" | "approved" — review state (F22)
+}
+
+export interface Snippet {
+  line: number;
+  text: string; // highlighted (matches wrapped in 「…」)
 }
 
 export interface SearchHit {
   rel: string;
   title: string;
-  line: number;
-  snippet: string;
+  line: number; // first/representative snippet line (back-compat)
+  snippet: string; // first/representative snippet text, highlighted (back-compat)
+  score: number; // relevance score (F13)
+  snippets: Snippet[]; // up to N highlighted snippets (F13)
+  project?: string; // source project for cross-project (--across) hits (F15)
+  readonly?: boolean; // true when the hit comes from a granted (read-only) scope (F15)
 }
 
 /** User-facing error (bad scope, unknown project, invalid type, etc.). */

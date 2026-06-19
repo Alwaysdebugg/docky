@@ -2,11 +2,12 @@
 title: F22 · Agent 产出审阅收件箱
 type: plan
 owner: PM
-status: proposed
+status: done
 priority: P0
 effort: M
 round: R5
 created: 2026-06-17
+completed: 2026-06-18
 tags: [agent, 治理, 审阅, 协作]
 ---
 
@@ -60,11 +61,11 @@ Enter 预览 · y 通过 · e 编辑 · x 退回 · m 合并 · a 全选 · Esc 
 
 ## 验收标准
 
-- [ ] agent 经 MCP 写入的文档默认 `source:agent, review:pending`。
-- [ ] `docky inbox` / `/inbox` 列出待审文档,可预览。
-- [ ] 通过/编辑/退回/合并均生效并经 F08 提交;支持批量通过。
-- [ ] 人类自己写/通过的文档不再出现在收件箱。
-- [ ] 作用域隔离不变;`listPending`/`setReview` 有单测。
+- [x] agent 经 MCP 写入的文档默认 `source:agent, review:pending`。
+- [x] `docky inbox` / `/inbox` 列出待审文档,可预览。
+- [x] 通过/编辑/退回/合并均生效并经 F08 提交;支持批量通过。
+- [x] 人类自己写/通过的文档不再出现在收件箱。
+- [x] 作用域隔离不变;`listPending`/`setReview` 有单测。
 
 ## 衡量指标
 
@@ -80,3 +81,15 @@ Enter 预览 · y 通过 · e 编辑 · x 退回 · m 合并 · a 全选 · Esc 
 
 - **补齐 agent 写入的治理闭环**:F20 写时去重(预防)→ **F22 事后人工审阅**(把关)→ F19 客观体检(兜底)。
 - 复用 **F08**(留痕)/**F04**(自上次以来)/**F01·F10·F11**(审阅交互)。
+
+## 实现记录
+
+- done — 2026-06-18 实现并通过测试(220/220)。
+  - `src/types.ts` + `src/core.ts`:`DocInfo` 增 `source`/`review`,`readDocMeta`/`listDocs` 解析 frontmatter `source`/`review`;新增 `stampFrontmatter`(合并字段到 frontmatter,保留正文)、`listPending`(`review===pending`)、`setReview`(改写 frontmatter + 校验 + F08 提交)。
+  - **来源标记**:`smartWrite`(F20,即 MCP `write_doc` 走的路径)在 new/replace/merge-write 时 `stampFrontmatter({source:agent, review:pending})`;append 后 `setReview(pending)` 让新内容重新进审。**人类侧 `add`/`writeDoc` 不经 smartWrite,不打标**(不进收件箱)。
+  - `src/cli.ts`:`docky inbox`(列待审)、`docky review <rel> <pending|approved>`。
+  - `src/tui.tsx`:`/inbox` 进入收件箱模式——多选(Space/a)、Enter 预览(F01)、`y` 通过(可批量)、`x` 退回(F10 回收站,可 /undo)、`e` 编辑;动作后自动刷新,清空即返回。
+  - `src/commands.ts`:`/inbox` 文本兜底。
+  - 异步治理:不阻塞 agent 写入(先落库后审);处置经 F08 可回溯;作用域隔离不变。
+  - 测试:`test/core.test.ts`(agent 写入打 pending/human 不打、listPending 只返待审、setReview approved 出箱+保留正文、非法 state 拒)+ `test/tui.test.tsx`(`/inbox` 列待审 + `y` 通过清空)。**经真实 MCP stdio 实测**:agent `write_doc` → `source:agent/review:pending` → `inbox` 列出 → `review approved` → 出箱。
+  - 备注:批量"通过"已支持(多选 + y);合并(merge)走 F20 的 `mode=merge` 在写入侧,收件箱聚焦 通过/退回/预览/编辑。

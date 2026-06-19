@@ -2,11 +2,12 @@
 title: F23 · 关系图谱视图
 type: plan
 owner: PM
-status: proposed
+status: done
 priority: P1
 effort: M
 round: R5
 created: 2026-06-17
+completed: 2026-06-18
 tags: [纵览, 知识图谱, 导航]
 ---
 
@@ -61,10 +62,10 @@ my-app · 关系图谱
 
 ## 验收标准
 
-- [ ] `docky graph` / `/graph` 呈现枢纽、簇群、孤岛与断链。
-- [ ] 可选中节点展开邻居并 Enter 打开对应文档。
-- [ ] 可导出关系图谱(供 F17)。
-- [ ] 作用域隔离不变(仅在本项目/F15 授权域内构图);`src/graph.ts` 有单测。
+- [x] `docky graph` / `/graph` 呈现枢纽、簇群、孤岛与断链。
+- [x] 可选中节点展开邻居并 Enter 打开对应文档。
+- [x] 可导出关系图谱(供 F17)。
+- [x] 作用域隔离不变(仅在本项目/F15 授权域内构图);`src/graph.ts` 有单测。
 
 ## 衡量指标
 
@@ -80,3 +81,13 @@ my-app · 关系图谱
 
 - **F12 的显式后续**:把其刻意推迟的"图形化"补上(列表 → 图谱)。
 - 为 **F21 仪表盘** 提供"枢纽/孤岛"洞察、为 **F17 导出** 提供关系页。
+
+## 实现记录
+
+- done — 2026-06-18 实现并通过测试(225/225)。
+  - `src/graph.ts`(新增):`buildGraph(vault, project)` 由 F12 链接/反链(`buildBacklinks`/`outlinksOf`)构建每节点 `{out, in, broken}`;`hubs`(按入度降序)、`clusters`(无向连通分量,size>1 按大小排序)、`isolates`(无出入链)。`graphLines`(枢纽+邻居树 / 簇 / 孤岛 的终端可读行,供 CLI/TUI 共用)、`toDot`(Graphviz DOT 导出,供 F17/外部渲染)。
+  - `src/cli.ts`:`docky graph [--dot]`(文本图谱 / DOT)。
+  - `src/tui.tsx`:`/graph` 进入图谱视图(SelectableList 呈现枢纽/簇/孤岛/断链),↑/↓ 选节点、Enter 复用 `pageDoc` 打开。
+  - 作用域:仅在本项目 `listDocs` 范围构图(不越界);强依赖 F12(无链接则图为孤岛集合)。
+  - 测试:`test/graph.test.ts`(out/in/broken 边、入度枢纽排序、连通分量成簇 + 孤岛、DOT 导出)+ `test/tui.test.tsx`(`/graph` 渲染图谱)。CLI 实测 graph(枢纽树 + ⚠ 断链 + 簇 + 孤岛)与 `--dot`。
+  - 备注:终端用层级/簇文本布局(不做力导向画布,非目标);真正可视化交给 `--dot` → Graphviz / F17 站点关系页;节点"→ 展开邻居"由枢纽树已直接展示邻居替代。

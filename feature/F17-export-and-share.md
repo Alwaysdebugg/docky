@@ -2,11 +2,12 @@
 title: F17 · 导出与分享
 type: plan
 owner: PM
-status: proposed
+status: done
 priority: P1
 effort: M
 round: R4
 created: 2026-06-17
+completed: 2026-06-18
 tags: [外延, 分享, 导出]
 ---
 
@@ -57,11 +58,11 @@ $ docky share design/架构.md
 
 ## 验收标准
 
-- [ ] `export --format site` 生成可离线打开的静态站点(首页 + 每篇页)。
-- [ ] F12 互链在站内解析为锚点;失效链接有标注。
-- [ ] F03 的 status/tags 在导出中以徽标呈现。
-- [ ] `share <rel>` 生成自包含单文件 HTML。
-- [ ] 导出仅含作用域内(或 F15 授权)文档;`src/export.ts` 有单测。
+- [x] `export --format site` 生成可离线打开的静态站点(首页 + 每篇页)。
+- [x] F12 互链在站内解析为锚点;失效链接有标注。
+- [x] F03 的 status/tags 在导出中以徽标呈现。
+- [x] `share <rel>` 生成自包含单文件 HTML。
+- [x] 导出仅含作用域内(或 F15 授权)文档;`src/export.ts` 有单测。
 
 ## 衡量指标
 
@@ -77,3 +78,14 @@ $ docky share design/架构.md
 
 - **复用 F16** 的渲染/大纲、**F12** 的互链、**F03** 的徽标、**F08** 的提交状态。
 - 是 R4"外延"的代表:把 R1–R3 积累的结构化文档**带出 docky**。
+
+## 实现记录
+
+- done — 2026-06-18 实现并通过测试(191/191)。
+  - `src/export.ts`(新增):`buildDocPage`(单篇自包含 HTML,内联 CSS;`md→HTML` 用独立 `new Marked()` 实例,避开 pager 配置的 ANSI 单例)、`buildIndexPage`(站点首页,按类型分组 + 徽标)、`exportSite`(index.html + 每篇一页)、`exportDocs`(html/md 批量)、`shareDoc`(单文件 HTML)。
+  - **F12 互链解析**:`site` 模式把 `[[type/name]]` 重写为站内锚点 `slug.html`(`/`→`__`),`single` 模式渲染为粗体;失效链接标 `⚠`;页脚渲染出链/被引用/失效。
+  - **F03 徽标**:`status`/`stale`/`tags` 渲染为带色徽标;首页同样带徽标。
+  - 作用域:仅导出 `core.listDocs(project)`(经 `filterDocs` 默认隐藏 archived),绝不含其他项目;读经 `readDoc`/`safePath`。
+  - `src/cli.ts`:`docky export [--format site|html|md] [-t 类型] [-o 目录]` 与 `docky share <rel> [-o 文件]`;`src/commands.ts`:`/export [目录]`、`/share <rel>`。
+  - 测试:`test/export.test.ts`(单篇渲染正文 + 状态/标签徽标 + 互链锚点 + 失效标注、exportSite 首页+分页+跨页锚点、shareDoc 自包含、**隐藏 archived + 不越作用域**)。CLI 实测 site(index + 2 页 + 链接/徽标)与 share(内联样式自包含)。
+  - 备注:不内建托管/上传(产物自行分发,非目标);`single` 自包含模式不产生跨页链接(避免指向不存在的文件)。

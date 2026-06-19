@@ -5,8 +5,14 @@ import path from "node:path";
 import { Command } from "commander";
 import * as core from "./core.js";
 import { listProjects } from "./core.js";
-import { getVaultPath, isInitialized } from "./config.js";
-import { colorizeDiff, pageRaw, viewMarkdown } from "./pager.js";
+import { getConfigValue, getVaultPath, isInitialized, listConfig, setConfigValue } from "./config.js";
+import { colorizeDiff, pageRaw, renderMarkdown } from "./pager.js";
+import { extractHeadings, renderToc } from "./outline.js";
+import { exportDocs, exportSite, shareDoc } from "./export.js";
+import { Severity, fixProject, lintProject } from "./lint.js";
+import { computeStats } from "./stats.js";
+import { buildGraph, graphLines, toDot } from "./graph.js";
+import { evalFolder, getFolder, listFolders, removeFolder, saveFolder } from "./savedsearch.js";
 import { DOCKY_HOOK_ENTRIES, contextText, guardDecision, mergeHooks } from "./hooks.js";
 import { applyImport, planImport } from "./importer.js";
 import { DOC_TYPES, DockyError } from "./types.js";
@@ -26,6 +32,7 @@ function readStdin(): Promise<string> {
 }
 
 const program = new Command();
+program.enablePositionalOptions(); // lets `save` pass a query that starts with --
 
 function vault(): string {
   return getVaultPath();
@@ -265,7 +272,10 @@ program
   .description("View a document, rendered, through your pager (path relative to project, e.g. design/foo.md).")
   .option("-p, --project <name>")
   .option("--raw", "Print raw Markdown instead of rendering/paging.")
-  .action((rel: string, opts: { project?: string; raw?: boolean }) => {
+  .option("--toc", "Prepend a table of contents (F16).")
+  .option("--width <n>", "Render width with reflow.")
+  .option("--theme <theme>", "Render theme: dark | none.")
+  .action((rel: string, opts: { project?: string; raw?: boolean; toc?: boolean; width?: string; theme?: string }) => {
     const v = vault();
     requireInit(v);
     const proj = resolve(v, opts.project);
@@ -274,27 +284,106 @@ program
     if (opts.raw) {
       console.log(content);
     } else {
-      viewMarkdown(content);
+      const prefs = core.renderPrefs(v);
+      const theme = opts.theme === "none" ? "none" : opts.theme === "dark" ? "dark" : prefs.theme;
+      let rendered = renderMarkdown(content, { width: opts.width ? Number(opts.width) : prefs.width, theme });
+      if (opts.toc) {
+        const toc = renderToc(extractHeadings(content));
+        if (toc) rendered = `\x1b[36m目录\x1b[0m\n${toc}\n\n${"─".repeat(24)}\n\n${rendered}`;
+      }
+      pageRaw(rendered);
+    }
+  });
+
+program
+  .command("links <rel>")
+  .description("Show a document's outgoing links, backlinks, and broken links (F12).")
+  .option("-p, --project <name>")
+  .action((rel: string, opts: { project?: string }) => {
+    const v = vault();
+    requireInit(v);
+    const proj = resolve(v, opts.project);
+    const links = guard(() => core.getLinks(v, proj, rel));
+    const outs = links.outlinks.filter((o) => o.rel).map((o) => o.rel);
+    console.log(`\x1b[36m出链 →\x1b[0m ${outs.length ? outs.join(", ") : "(none)"}`);
+    console.log(`\x1b[36m被引用 ←\x1b[0m ${links.backlinks.length ? links.backlinks.join(", ") : "(none)"}`);
+    if (links.broken.length) {
+      console.log(`\x1b[31m⚠ broken →\x1b[0m ${links.broken.map((b) => `[[${b}]]`).join(", ")}`);
     }
   });
 
 program
   .command("search <query>")
-  .description("Search documents within the current project's scope.")
+  .description("Search documents (relevance-ranked, multi-snippet, highlighted).")
   .option("-p, --project <name>")
   .option("-t, --type <type>")
-  .action((query: string, opts: { project?: string; type?: string }) => {
+  .option("--fuzzy", "Fuzzy (subsequence) matching via match.ts.")
+  .option("--across", "Include granted (read-only) cross-project scopes (F15).")
+  .action((query: string, opts: { project?: string; type?: string; fuzzy?: boolean; across?: boolean }) => {
     const v = vault();
     requireInit(v);
     const proj = resolve(v, opts.project);
-    const hits = guard(() => core.searchDocs(v, proj, query, opts.type));
+    if (opts.across) {
+      const hits = guard(() => core.searchAcross(v, proj, query, { type: opts.type, fuzzy: Boolean(opts.fuzzy) }));
+      if (hits.length === 0) {
+        console.log(`No matches for '${query}'.`);
+        return;
+      }
+      for (const h of hits) {
+        const tag = h.readonly ? `[${h.project}↗]` : `[${h.project}]`;
+        console.log(`\x1b[33m★${h.score}\x1b[0m \x1b[36m${tag} ${h.rel}\x1b[0m`);
+        for (const s of h.snippets) console.log(`    ${s.line ? `L${s.line} ` : ""}${s.text}`);
+      }
+      return;
+    }
+    const hits = guard(() => core.searchDocs(v, proj, query, opts.type, {}, { fuzzy: Boolean(opts.fuzzy) }));
     if (hits.length === 0) {
       console.log(`No matches for '${query}' in ${proj}.`);
       return;
     }
     for (const h of hits) {
-      const loc = h.line ? `${h.rel}:${h.line}` : h.rel;
-      console.log(`\x1b[36m${loc}\x1b[0m  ${h.snippet}`);
+      console.log(`\x1b[33m★${h.score}\x1b[0m \x1b[36m${h.rel}\x1b[0m`);
+      for (const s of h.snippets) console.log(`    ${s.line ? `L${s.line} ` : ""}${s.text}`);
+    }
+  });
+
+program
+  .command("grant <target>")
+  .description("Grant this project read-only access to <other> or <other:type> (F15).")
+  .option("-p, --project <name>")
+  .action((target: string, opts: { project?: string }) => {
+    const v = vault();
+    requireInit(v);
+    const proj = resolve(v, opts.project);
+    guard(() => core.addGrant(v, proj, target));
+    ok(`Granted ${proj} → ${target} (read-only)`);
+  });
+
+program
+  .command("revoke <target>")
+  .description("Revoke a cross-project read-only grant.")
+  .option("-p, --project <name>")
+  .action((target: string, opts: { project?: string }) => {
+    const v = vault();
+    requireInit(v);
+    const proj = resolve(v, opts.project);
+    guard(() => core.revokeGrant(v, proj, target));
+    ok(`Revoked ${proj} → ${target}`);
+  });
+
+program
+  .command("grants")
+  .description("List cross-project read-only grants (audit).")
+  .action(() => {
+    const v = vault();
+    requireInit(v);
+    const entries = Object.entries(core.listGrants(v)).filter(([, l]) => l.length > 0);
+    if (entries.length === 0) {
+      console.log("No cross-project grants (full isolation).");
+      return;
+    }
+    for (const [proj, list] of entries) {
+      console.log(`  \x1b[36m${proj}\x1b[0m  →  ${list.map((t) => `${t} (只读↗)`).join(", ")}`);
     }
   });
 
@@ -388,6 +477,245 @@ program
       return;
     }
     pageRaw(colorizeDiff(diff));
+  });
+
+program
+  .command("export")
+  .description("Export project docs out of docky: --format site | html | md (F17).")
+  .option("-p, --project <name>")
+  .option("-t, --type <type>", "Only export this type (html/md formats).")
+  .option("--format <fmt>", "site | html | md", "site")
+  .option("-o, --out <dir>", "Output directory", "./docky-export")
+  .action((opts: { project?: string; type?: string; format?: string; out?: string }) => {
+    const v = vault();
+    requireInit(v);
+    const proj = resolve(v, opts.project);
+    const out = path.resolve(opts.out ?? "./docky-export");
+    if (opts.format === "site" || !opts.format) {
+      const r = guard(() => exportSite(v, proj, out));
+      ok(`${r.count} 篇 → ${r.dir} (index.html + ${r.count} 页;互链已解析,徽标已渲染)`);
+    } else {
+      const format = opts.format === "md" ? "md" : "html";
+      const r = guard(() => exportDocs(v, proj, out, { type: opts.type, format }));
+      ok(`${r.count} 篇 (${format}) → ${r.dir}`);
+    }
+  });
+
+program
+  .command("share <rel>")
+  .description("Export one document as a self-contained HTML file, ready to send (F17).")
+  .option("-p, --project <name>")
+  .option("-o, --out <file>", "Output file path.")
+  .action((rel: string, opts: { project?: string; out?: string }) => {
+    const v = vault();
+    requireInit(v);
+    const proj = resolve(v, opts.project);
+    const out = guard(() => shareDoc(v, proj, rel, opts.out));
+    ok(`${out} (自包含,可直接发送)`);
+  });
+
+program
+  .command("config [arg1] [arg2] [arg3]")
+  .description("View or change preferences. No args = list; <key> = get; <key> <value> = set (F18).")
+  .action((arg1: string | undefined, arg2: string | undefined, arg3: string | undefined) => {
+    const v = vault();
+    requireInit(v);
+    // Support both `config <key> [value]` and `config get|set <key> [value]`.
+    let action: "list" | "get" | "set";
+    let key: string | undefined;
+    let value: string | undefined;
+    if (arg1 === undefined) action = "list";
+    else if (arg1 === "get" || arg1 === "set") {
+      action = arg1;
+      key = arg2;
+      value = arg3;
+    } else {
+      key = arg1;
+      value = arg2;
+      action = value === undefined ? "get" : "set";
+    }
+
+    if (action === "list") {
+      console.log(`vault         ${v}`);
+      for (const r of listConfig(v)) {
+        const def = r.value === r.default ? "" : ` \x1b[2m(默认 ${r.default})\x1b[0m`;
+        console.log(`${r.key.padEnd(14)}${r.value.padEnd(10)}\x1b[2m${r.desc}\x1b[0m${def}`);
+      }
+      return;
+    }
+    if (!key) fail("用法: docky config [<key> [value]] | get <key> | set <key> <value>");
+    if (action === "get") {
+      console.log(guard(() => getConfigValue(v, key!)));
+      return;
+    }
+    if (value === undefined) fail(`用法: docky config set ${key} <value>`);
+    guard(() => setConfigValue(v, key!, value!));
+    ok(`${key} = ${value}`);
+  });
+
+program
+  .command("inbox")
+  .description("List agent-written documents awaiting review (review: pending) — F22.")
+  .option("-p, --project <name>")
+  .action((opts: { project?: string }) => {
+    const v = vault();
+    requireInit(v);
+    const proj = resolve(v, opts.project);
+    const pending = core.listPending(v, proj);
+    if (pending.length === 0) {
+      console.log("收件箱为空(无待审文档)。");
+      return;
+    }
+    console.log(`\x1b[36m收件箱 · ${proj}\x1b[0m  (${pending.length} 篇待审)`);
+    for (const d of pending) {
+      console.log(`  ${d.rel}  \x1b[2m${d.source ?? "?"}\x1b[0m  ${d.title}`);
+    }
+  });
+
+program
+  .command("review <rel> <state>")
+  .description("Set a document's review state: pending | approved (F22).")
+  .option("-p, --project <name>")
+  .action((rel: string, state: string, opts: { project?: string }) => {
+    const v = vault();
+    requireInit(v);
+    const proj = resolve(v, opts.project);
+    guard(() => core.setReview(v, proj, rel, state));
+    ok(`${rel} → review: ${state}`);
+  });
+
+program
+  .command("save <name> <query...>")
+  .passThroughOptions() // query tokens after <name> (e.g. --status draft) are operands
+  .description('Save a named smart folder, e.g. docky save 待办 --status draft (F24).')
+  .option("-p, --project <name>")
+  .action((name: string, query: string[], opts: { project?: string }) => {
+    const v = vault();
+    requireInit(v);
+    const proj = resolve(v, opts.project);
+    const q = query.join(" ");
+    guard(() => saveFolder(v, proj, name, q));
+    ok(`智能文件夹「${name}」= ${q}`);
+  });
+
+program
+  .command("unsave <name>")
+  .description("Delete a saved smart folder.")
+  .option("-p, --project <name>")
+  .action((name: string, opts: { project?: string }) => {
+    const v = vault();
+    requireInit(v);
+    const proj = resolve(v, opts.project);
+    guard(() => removeFolder(v, proj, name));
+    ok(`已删除智能文件夹「${name}」`);
+  });
+
+program
+  .command("folders")
+  .description("List saved smart folders with live result counts (F24).")
+  .option("-p, --project <name>")
+  .action((opts: { project?: string }) => {
+    const v = vault();
+    requireInit(v);
+    const proj = resolve(v, opts.project);
+    const folders = listFolders(v, proj);
+    if (folders.length === 0) {
+      console.log("还没有智能文件夹(docky save <名称> <查询>)。");
+      return;
+    }
+    const w = Math.max(...folders.map((f) => f.name.length), 6) + 2;
+    for (const f of folders) {
+      const n = evalFolder(v, proj, f.query).length;
+      console.log(`  \x1b[36m${f.name.padEnd(w)}\x1b[0m${f.query.padEnd(28)}\x1b[2m(${n} 篇)\x1b[0m`);
+    }
+  });
+
+program
+  .command("open-folder <name>")
+  .description("Evaluate a smart folder live and list its documents (F24).")
+  .option("-p, --project <name>")
+  .action((name: string, opts: { project?: string }) => {
+    const v = vault();
+    requireInit(v);
+    const proj = resolve(v, opts.project);
+    const query = getFolder(v, proj, name);
+    if (query === null) fail(`没有名为「${name}」的智能文件夹。`);
+    const docs = evalFolder(v, proj, query!);
+    console.log(`\x1b[36m📂 ${name}\x1b[0m  \x1b[2m${query}\x1b[0m  (${docs.length} 篇)`);
+    for (const d of docs) console.log(`  ${d.type.padEnd(12)} ${d.title}  \x1b[2m(${d.name})\x1b[0m`);
+  });
+
+program
+  .command("graph")
+  .description("Show the project's relationship graph: hubs, clusters, isolates (F23).")
+  .option("-p, --project <name>")
+  .option("--dot", "Output Graphviz DOT instead (for F17 / external rendering).")
+  .action((opts: { project?: string; dot?: boolean }) => {
+    const v = vault();
+    requireInit(v);
+    const proj = resolve(v, opts.project);
+    const g = buildGraph(v, proj);
+    if (opts.dot) {
+      console.log(toDot(g));
+      return;
+    }
+    console.log(`\x1b[36m${proj} · 关系图谱\x1b[0m`);
+    for (const l of graphLines(g)) {
+      const header = l.rel === null && /^(枢纽|簇|孤岛)/.test(l.label);
+      console.log(header ? `\x1b[33m${l.label}\x1b[0m` : `  ${l.label}`);
+    }
+  });
+
+program
+  .command("stats")
+  .alias("dashboard")
+  .description("Read-only knowledge-base overview: type×status, references, tags, health (F21).")
+  .option("-p, --project <name>")
+  .action((opts: { project?: string }) => {
+    const v = vault();
+    requireInit(v);
+    const proj = resolve(v, opts.project);
+    const s = computeStats(v, proj);
+    console.log(`\x1b[36m${proj} · 概览\x1b[0m  (共 ${s.total} 篇)`);
+    console.log(`${"类型".padEnd(12)}${"active".padEnd(8)}${"done".padEnd(7)}${"archived".padEnd(10)}陈旧⚠`);
+    for (const t of s.byType) {
+      console.log(
+        `${t.type.padEnd(12)}${String(t.active).padEnd(8)}${String(t.done).padEnd(7)}${String(t.archived).padEnd(10)}${t.stale || ""}`
+      );
+    }
+    if (s.mostReferenced.length) {
+      console.log(`被引用最多  ${s.mostReferenced.map((m) => `${m.rel} (×${m.count})`).join(" · ")}`);
+    }
+    console.log(`孤立文档    ${s.orphans.length} 篇(无任何互链)`);
+    if (s.tagHeat.length) console.log(`标签热度    ${s.tagHeat.map((t) => `#${t.tag} ${t.count}`).join(" · ")}`);
+    console.log(`健康        \x1b[31m✗${s.health.error} error\x1b[0m · \x1b[33m⚠${s.health.warn} warn\x1b[0m   (docky doctor 查看)`);
+  });
+
+program
+  .command("doctor")
+  .alias("lint")
+  .description("Health-check the project's docs; --fix applies safe repairs (F19).")
+  .option("-p, --project <name>")
+  .option("--fix", "Apply safe auto-fixes (add frontmatter, rebuild INDEX, commit).")
+  .action((opts: { project?: string; fix?: boolean }) => {
+    const v = vault();
+    requireInit(v);
+    const proj = resolve(v, opts.project);
+    if (opts.fix) {
+      const fixed = fixProject(v, proj, lintProject(v, proj));
+      ok(`已自动修复 ${fixed} 项(补 frontmatter / 重建 INDEX / 提交)`);
+    }
+    const issues = lintProject(v, proj);
+    const icon: Record<Severity, string> = { error: "\x1b[31m✗\x1b[0m", warn: "\x1b[33m⚠\x1b[0m", info: "\x1b[34mℹ\x1b[0m" };
+    const w = Math.max(...issues.map((i) => (i.rel ?? "").length), 8);
+    for (const i of issues) {
+      console.log(`${icon[i.severity]} ${(i.rel ?? "").padEnd(w)}  ${i.message}  \x1b[2m→ ${i.fix}\x1b[0m`);
+    }
+    const n = (s: Severity) => issues.filter((i) => i.severity === s).length;
+    const fixable = issues.filter((i) => i.fixable).length;
+    if (issues.length === 0) console.log("\x1b[32m✓ 文档库健康,无问题\x1b[0m");
+    else console.log(`\n汇总:${n("error")} error · ${n("warn")} warn · ${n("info")} info${fixable ? `  (--fix 可自动修 ${fixable} 项)` : ""}`);
+    process.exit(n("error") > 0 ? 1 : 0);
   });
 
 program

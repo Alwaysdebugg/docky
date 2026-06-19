@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import * as core from "../src/core.js";
-import { COMMANDS, executeCommand, parseListArgs, suggest } from "../src/commands.js";
+import { COMMANDS, executeCommand, parseListArgs, suggest, suggestArgs } from "../src/commands.js";
 
 let tmp: string;
 let vault: string;
@@ -152,6 +152,43 @@ describe("onboarding (F05)", () => {
     const text = res.output.map((o) => o.text).join("\n");
     expect(text).toContain("未注册");
     expect(text).toContain("docky register");
+  });
+});
+
+describe("suggestArgs (F14)", () => {
+  it("completes doc paths for /open, fuzzily", () => {
+    core.writeDoc(vault, "p", "design", "architecture", "# arch");
+    core.writeDoc(vault, "p", "debug", "login", "# login");
+    expect(suggestArgs(vault, "p", "/open arch")).toContain("design/architecture.md");
+    expect(suggestArgs(vault, "p", "/open ")).toContain("debug/login.md"); // empty frag → all
+  });
+  it("completes types for /add and statuses for /status's 2nd arg", () => {
+    core.writeDoc(vault, "p", "design", "a", "# A");
+    expect(suggestArgs(vault, "p", "/add des")).toContain("design");
+    expect(suggestArgs(vault, "p", "/status design/a.md ar")).toContain("archived");
+  });
+  it("completes project names for /use", () => {
+    core.registerProject(vault, "other", path.join(tmp, "other"));
+    expect(suggestArgs(vault, "p", "/use ot")).toContain("other");
+  });
+  it("returns [] while still on the command word (defer to suggest)", () => {
+    expect(suggestArgs(vault, "p", "/op")).toEqual([]);
+    expect(suggestArgs(vault, "p", "/search foo")).toEqual([]); // free-text command
+  });
+});
+
+describe("command history (F14)", () => {
+  it("persists, dedupes consecutive, and reloads", () => {
+    core.pushHistory(vault, "p", "/list");
+    core.pushHistory(vault, "p", "/list"); // consecutive dup → skipped
+    core.pushHistory(vault, "p", "/search session");
+    expect(core.loadHistory(vault, "p")).toEqual(["/list", "/search session"]);
+  });
+  it("caps history length", () => {
+    for (let i = 0; i < 250; i++) core.pushHistory(vault, "p", `/cmd${i}`);
+    const h = core.loadHistory(vault, "p");
+    expect(h.length).toBe(200);
+    expect(h[h.length - 1]).toBe("/cmd249");
   });
 });
 

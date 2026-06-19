@@ -2,11 +2,12 @@
 title: F14 · REPL 手感升级(参数补全 + 命令历史)
 type: plan
 owner: PM
-status: proposed
+status: done
 priority: P1
 effort: S
 round: R3
 created: 2026-06-17
+completed: 2026-06-18
 tags: [tui, 效率, repl]
 ---
 
@@ -58,11 +59,11 @@ REPL 的补全与历史都只做了一半:
 
 ## 验收标准
 
-- [ ] Tab 能按命令上下文补 路径/类型/项目名,且模糊匹配。
-- [ ] 菜单关闭时 `↑/↓` 召回历史;`Ctrl-R` 可反向搜索。
-- [ ] 历史跨会话持久化、去重、有上限。
-- [ ] 与既有命令菜单/选择器的 `↑/↓` 不冲突(仅在合适上下文接管)。
-- [ ] 补全与历史逻辑有单测(参考 `test/commands.test.ts`)。
+- [x] Tab 能按命令上下文补 路径/类型/项目名,且模糊匹配。
+- [x] 菜单关闭时 `↑/↓` 召回历史;`Ctrl-R` 可反向搜索。
+- [x] 历史跨会话持久化、去重、有上限。
+- [x] 与既有命令菜单/选择器的 `↑/↓` 不冲突(仅在合适上下文接管)。
+- [x] 补全与历史逻辑有单测(参考 `test/commands.test.ts`)。
 
 ## 衡量指标
 
@@ -78,3 +79,13 @@ REPL 的补全与历史都只做了一半:
 
 - **复用已交付 F02** 的 `src/match.ts`;与 F02 同属"降低输入摩擦"但面不同(参数/历史 vs 文档打开)。
 - 让 **F05** 之后的新用户更快上手命令;让 **F11** 的整理流更顺(快速敲准路径/类型)。
+
+## 实现记录
+
+- done — 2026-06-18 实现并通过测试(172/172)。
+  - `src/commands.ts`:新增 `suggestArgs(vault, project, input)`——按命令 + 当前参数位返回候选:`/open|/rm|/mv|/links|/pin|/log|/diff <rel>` 补作用域文档路径、`/add|/new|/list <类型>` 与 `/mv` 第2位补 `DOC_TYPES`、`/status` 第2位补 `DOC_STATUSES`、`/use` 补项目名;复用 F02 `match.fuzzy` 排序,上限 12;空格前(命令词)交还 `suggest()`。
+  - `src/core.ts`:`loadHistory`/`pushHistory`(项目内 `.docky-history`,经 `safePath` 作用域安全、去重连续、上限 200、已 gitignore)。
+  - `src/tui.tsx`:菜单关闭且在参数位时 Tab 弹出参数候选并补全(替换当前 token + 追加空格);命令菜单/参数菜单均无时 `↑/↓` 召回历史、`Ctrl-R` 反向搜索(含当前片段的更旧条目);打字即重置历史浏览;挂载时按当前项目载入历史、提交时持久化。
+  - 分流:`↑/↓` 严格优先级为 命令菜单 → 参数菜单 → 历史,避免与既有选择器冲突;命令历史状态命名 `cmdHist` 以避开既有"输出历史" state。
+  - 测试:`test/commands.test.ts`(suggestArgs 补路径/类型/状态/项目 + 命令词返回空;history 持久化/去重/封顶)+ `test/tui.test.tsx`(Tab 补全文档路径、`↑` 召回历史到 `[p] ›` 提示行)。
+  - 备注:`Ctrl-R` 为轻量实现(按当前片段循环更旧匹配,非完整 incremental 反搜提示);历史按项目持久化,会话内切项目沿用内存历史。

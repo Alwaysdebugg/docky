@@ -18,4 +18,14 @@ describe("renderMarkdown", () => {
   it("never throws on odd input", () => {
     expect(() => renderMarkdown("```\nunclosed")).not.toThrow();
   });
+
+  it("theme 'none' strips ANSI color (F16)", () => {
+    const plain = renderMarkdown("# Hello\n\n**bold** text", { theme: "none" });
+    expect(plain).toContain("Hello");
+    expect(plain).not.toMatch(/\x1b\[/); // no ANSI escapes
+  });
+
+  it("accepts a width option without throwing (F16)", () => {
+    expect(() => renderMarkdown("a ".repeat(200), { width: 40 })).not.toThrow();
+  });
 });

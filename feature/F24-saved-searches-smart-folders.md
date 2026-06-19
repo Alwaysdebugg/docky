@@ -2,11 +2,12 @@
 title: F24 · 保存的搜索与智能文件夹
 type: plan
 owner: PM
-status: proposed
+status: done
 priority: P1
 effort: S
 round: R5
 created: 2026-06-17
+completed: 2026-06-18
 tags: [检索, 效率, 持久化]
 ---
 
@@ -57,10 +58,10 @@ $ docky folders
 
 ## 验收标准
 
-- [ ] 可保存/列出/删除命名智能文件夹;查询复用 F03/F13,不引入新语法。
-- [ ] 打开文件夹**实时求值**(随库变化更新),结果为可选列表(复用 F01)。
-- [ ] 智能文件夹出现在 F04 主页与 F02 快速打开候选中。
-- [ ] 跨会话持久化;作用域隔离不变;`src/savedsearch.ts` 有单测。
+- [x] 可保存/列出/删除命名智能文件夹;查询复用 F03/F13,不引入新语法。
+- [x] 打开文件夹**实时求值**(随库变化更新),结果为可选列表(复用 F01)。
+- [x] 智能文件夹出现在 F04 主页与 F02 快速打开候选中。
+- [x] 跨会话持久化;作用域隔离不变;`src/savedsearch.ts` 有单测。
 
 ## 衡量指标
 
@@ -76,3 +77,13 @@ $ docky folders
 
 - **把 F03/F13 的一次性检索固化为可复用视图**;与 **F04** 互补(静态置顶文档 vs 动态置顶查询)。
 - 经 **F02 快速打开** 与 **F04 主页** 暴露;偏好持久化复用 **F18**。
+
+## 实现记录
+
+- done — 2026-06-18 实现并通过测试(231/231)。
+  - `src/savedsearch.ts`(新增):每项目 `.docky-folders.json`(`{名称: 查询}`,经 `safePath` 作用域安全、已 gitignore)。`saveFolder`/`removeFolder`/`getFolder`/`listFolders`;`parseQuery`(把查询拆成 F03 过滤 `type/--status/#tag/--stale` + 余下 F13 关键词,**不引入新语法**);`evalFolder`(**实时求值**:有关键词走 `searchDocs`+filter,否则 `filterDocs`)。
+  - `src/cli.ts`:`docky save <名> <查询...>`(用 `enablePositionalOptions`+`passThroughOptions`,使以 `--` 开头的查询可作为操作数;其余命令解析不受影响)、`unsave`、`folders`(列出 + 实时计数)、`open-folder <名>`(实时求值列出)。
+  - `src/commands.ts`:`/save`、`/folders`;`src/tui.tsx`:`/f <名>` 实时求值进入 browse 可选列表;**F04 主页新增「📂 智能文件夹」行**(列出名称,提示 `/f`)。
+  - 持久化跨会话;作用域隔离不变;空名/空查询被拒。
+  - 测试:`test/savedsearch.test.ts`(增删查持久化、parseQuery 拆分、evalFolder 过滤/关键词、**实时随库变化**、空值拒绝)+ `test/tui.test.tsx`(主页显示文件夹 + `/f` 实时打开)。CLI 实测 save(`--` 开头查询)/folders 计数/open-folder 实时(加文档后计数+1)。
+  - 备注:F02 快速打开的候选暴露以主页「📂 智能文件夹」+ `/f` 承载(未塞进模糊 doc 候选以免混淆文档与查询);持久化用独立状态文件(F18 已上线,后续可迁入 config 体系)。

@@ -22,6 +22,8 @@ import {
   saveConfig,
 } from "./config.js";
 import { loadTemplate, renderTemplate, writeDefaultTemplates } from "./templates.js";
+import { ResolvedLink, buildBacklinks, outlinksOf } from "./links.js";
+import { fuzzyScore } from "./match.js";
 
 // --------------------------------------------------------------------------- //
 // Git helpers
@@ -159,10 +161,10 @@ export function initVault(vault: string, useGit = true): string {
   writeDefaultTemplates(vault); // F06: seed per-type scaffolding templates
   if (useGit && !fs.existsSync(path.join(vault, ".git"))) {
     git(vault, ["init", "-q"]);
-    // Keep per-project state, trash, and oplog out of version control (F08/F10).
+    // Keep per-project state, trash, oplog, history, and folders out of git.
     fs.writeFileSync(
       path.join(vault, ".gitignore"),
-      "**/.docky-state.json\n**/.docky-oplog.json\n**/.trash/\n",
+      "**/.docky-state.json\n**/.docky-oplog.json\n**/.docky-history\n**/.docky-folders.json\n**/.trash/\n",
       "utf-8"
     );
   }
@@ -224,6 +226,11 @@ export function registerProject(vault: string, name: string, localPath: string, 
 
 export function listProjects(vault: string): Config["projects"] {
   return loadConfig(vault).projects;
+}
+
+/** Reading-view render preferences (width / theme), from config (F16/F18). */
+export function renderPrefs(vault: string): Config["render"] {
+  return loadConfig(vault).render;
 }
 
 /** Best-guess project name for a directory: git repo name, else dir basename. */
@@ -321,6 +328,8 @@ interface DocMeta {
   title: string;
   status: DocStatus;
   tags: string[];
+  source?: string;
+  review?: string;
 }
 
 /** Coerce a frontmatter `status` value to a known lifecycle state. */
@@ -363,7 +372,13 @@ function readDocMeta(filePath: string): DocMeta {
     }
   }
   if (!title) title = path.basename(filePath, ".md");
-  return { title, status: normalizeStatus(fm.status), tags: normalizeTags(fm.tags) };
+  return {
+    title,
+    status: normalizeStatus(fm.status),
+    tags: normalizeTags(fm.tags),
+    source: fm.source ? String(fm.source) : undefined,
+    review: fm.review ? String(fm.review) : undefined,
+  };
 }
 
 function safeMtimeMs(filePath: string): number {
@@ -406,6 +421,8 @@ export function listDocs(vault: string, project: string, docType?: string): DocI
         tags: meta.tags,
         mtime,
         stale: computeStale(t, meta.status, mtime, staleDays, now),
+        source: meta.source,
+        review: meta.review,
       });
     }
   }
@@ -800,33 +817,369 @@ export function undo(vault: string, project: string): string {
   return desc;
 }
 
+const SNIPPET_MAX = 3; // snippets kept per doc
+const SCAN_LINES = 2000; // cap per-doc scan for very large files
+
+/** Wrap each case-insensitive occurrence of `q` in the text with 「…」 (F13). */
+function highlight(text: string, q: string): string {
+  if (!q) return text;
+  const lo = text.toLowerCase();
+  let out = "";
+  let i = 0;
+  for (;;) {
+    const j = lo.indexOf(q, i);
+    if (j < 0) {
+      out += text.slice(i);
+      break;
+    }
+    out += text.slice(i, j) + "「" + text.slice(j, j + q.length) + "」";
+    i = j + q.length;
+  }
+  return out;
+}
+
+/**
+ * Search a project's docs (F13): relevance-scored, multi-snippet, with hit
+ * highlighting and optional fuzzy matching. Sorted best-first. Title/name hits
+ * outweigh body hits; status (F03) and recency (F04) feed the score. Archived
+ * docs are excluded by default (via filter). Scope isolation is unchanged.
+ */
 export function searchDocs(
   vault: string,
   project: string,
   query: string,
   docType?: string,
-  filter: DocFilter = {}
+  filter: DocFilter = {},
+  opts: { fuzzy?: boolean; maxSnippets?: number } = {}
 ): SearchHit[] {
-  const q = query.toLowerCase();
+  const q = query.toLowerCase().trim();
+  if (!q) return [];
+  const maxSnip = opts.maxSnippets ?? SNIPPET_MAX;
+
+  const recents = getRecents(vault, project);
+  const recentRank = new Map<string, number>();
+  recents.forEach((rel, i) => recentRank.set(rel, recents.length - i));
+
   const hits: SearchHit[] = [];
   for (const doc of filterDocs(listDocs(vault, project, docType), filter)) {
-    let lines: string[];
+    const body = readBody(doc.path);
+    const lines = body.split("\n");
+    const titleHit = doc.title.toLowerCase().includes(q) || doc.name.toLowerCase().includes(q);
+
+    const snippets: { line: number; text: string }[] = [];
+    let bodyHits = 0;
+    const scan = Math.min(lines.length, SCAN_LINES);
+    for (let i = 0; i < scan; i++) {
+      if (lines[i].toLowerCase().includes(q)) {
+        bodyHits++;
+        if (snippets.length < maxSnip) {
+          snippets.push({ line: i + 1, text: highlight(lines[i].trim().slice(0, 200), q) });
+        }
+      }
+    }
+
+    let matched = titleHit || bodyHits > 0;
+    let fuzzyOnly = false;
+    if (!matched && opts.fuzzy && fuzzyScore(q, `${doc.title} ${doc.name}`) !== null) {
+      matched = true;
+      fuzzyOnly = true;
+    }
+    if (!matched) continue;
+
+    let score = 0;
+    if (titleHit) score += 8;
+    score += Math.min(bodyHits, 5) * 2;
+    score += doc.status === "active" ? 3 : doc.status === "draft" ? 1 : 0;
+    score += recentRank.get(doc.rel) ?? 0;
+    if (fuzzyOnly) score += 2;
+
+    const first = snippets[0] ?? { line: 0, text: highlight(doc.title, q) };
+    hits.push({
+      rel: doc.rel,
+      title: doc.title,
+      line: first.line,
+      snippet: first.text,
+      score,
+      snippets: snippets.length ? snippets : [first],
+    });
+  }
+
+  hits.sort((a, b) => b.score - a.score || a.rel.localeCompare(b.rel));
+  return hits;
+}
+
+// --------------------------------------------------------------------------- //
+// Governed cross-project access (F15) — read-only, explicit, auditable.
+// Writes NEVER consult scopes; isolation stays the default.
+// --------------------------------------------------------------------------- //
+export interface Scope {
+  project: string;
+  type?: string; // type-scoped grant (e.g. "platform:design")
+  readonly: boolean; // true for granted cross-project scopes
+}
+
+function parseGrant(raw: string): { project: string; type?: string } {
+  const i = raw.indexOf(":");
+  return i < 0 ? { project: raw } : { project: raw.slice(0, i), type: raw.slice(i + 1) };
+}
+
+/** The scopes a project may READ: itself (full) + granted projects (read-only,
+ *  possibly type-scoped). Unknown/invalid grants are silently dropped (F15). */
+export function resolveScopes(vault: string, project: string): Scope[] {
+  const cfg = loadConfig(vault);
+  const scopes: Scope[] = [{ project, readonly: false }];
+  const seen = new Set<string>();
+  for (const raw of cfg.grants[project] ?? []) {
+    const { project: proj, type } = parseGrant(raw);
+    if (proj === project || !(proj in cfg.projects)) continue;
+    if (type && !(DOC_TYPES as readonly string[]).includes(type)) continue;
+    const key = `${proj}:${type ?? "*"}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    scopes.push({ project: proj, type, readonly: true });
+  }
+  return scopes;
+}
+
+/** Grant `project` read-only access to `target` ("other" or "other:type"). */
+export function addGrant(vault: string, project: string, target: string): void {
+  const cfg = loadConfig(vault);
+  if (!(project in cfg.projects)) throw new DockyError(`Unknown project: ${project}`);
+  const { project: proj, type } = parseGrant(target);
+  if (proj === project) throw new DockyError("A project cannot grant access to itself.");
+  if (!(proj in cfg.projects)) throw new DockyError(`Unknown grant target project: ${proj}`);
+  if (type && !(DOC_TYPES as readonly string[]).includes(type)) {
+    throw new DockyError(`Invalid type '${type}'. Allowed: ${DOC_TYPES.join(", ")}`);
+  }
+  const list = cfg.grants[project] ?? [];
+  if (!list.includes(target)) list.push(target);
+  cfg.grants[project] = list;
+  saveConfig(vault, cfg);
+  autoCommitVault(vault, `grant: ${project} → ${target}`);
+}
+
+export function revokeGrant(vault: string, project: string, target: string): void {
+  const cfg = loadConfig(vault);
+  const list = (cfg.grants[project] ?? []).filter((g) => g !== target);
+  if (list.length) cfg.grants[project] = list;
+  else delete cfg.grants[project];
+  saveConfig(vault, cfg);
+  autoCommitVault(vault, `revoke: ${project} → ${target}`);
+}
+
+export function listGrants(vault: string): Record<string, string[]> {
+  return loadConfig(vault).grants;
+}
+
+export interface AcrossHit extends SearchHit {
+  project: string;
+  readonly: boolean;
+}
+
+/**
+ * Search the project plus every granted (read-only) scope, tagging each hit
+ * with its source project. Each per-scope search runs inside that project's own
+ * safePath — there is no `../` traversal and writes never use this path (F15).
+ */
+export function searchAcross(
+  vault: string,
+  project: string,
+  query: string,
+  opts: { type?: string; fuzzy?: boolean } = {}
+): AcrossHit[] {
+  const out: AcrossHit[] = [];
+  for (const sc of resolveScopes(vault, project)) {
+    const type = sc.type ?? opts.type; // type-scoped grants restrict to their type
+    if (sc.type && opts.type && sc.type !== opts.type) continue; // grant narrower than request
+    let hits: SearchHit[];
     try {
-      lines = fs.readFileSync(doc.path, "utf-8").split("\n");
+      hits = searchDocs(vault, sc.project, query, type, {}, { fuzzy: opts.fuzzy });
     } catch {
       continue;
     }
-    if (doc.name.toLowerCase().includes(q) || doc.title.toLowerCase().includes(q)) {
-      hits.push({ rel: doc.rel, title: doc.title, line: 0, snippet: doc.title });
-    }
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i].toLowerCase().includes(q)) {
-        hits.push({ rel: doc.rel, title: doc.title, line: i + 1, snippet: lines[i].trim().slice(0, 200) });
-        break; // one snippet per doc keeps results compact
-      }
-    }
+    for (const h of hits) out.push({ ...h, project: sc.project, readonly: sc.readonly });
   }
-  return hits;
+  out.sort(
+    (a, b) => b.score - a.score || a.project.localeCompare(b.project) || a.rel.localeCompare(b.rel)
+  );
+  return out;
+}
+
+// --------------------------------------------------------------------------- //
+// Smart write: dedupe / append / merge for agent writes (F20)
+// --------------------------------------------------------------------------- //
+/** Character-bigram set, used for a tokenizer-free similarity (CJK + ASCII). */
+function bigrams(s: string): Set<string> {
+  const t = s.toLowerCase().replace(/\s+/g, "");
+  const set = new Set<string>();
+  for (let i = 0; i + 1 < t.length; i++) set.add(t.slice(i, i + 2));
+  return set;
+}
+
+/** Jaccard similarity of two strings' character bigrams (0–1). */
+export function textSimilarity(a: string, b: string): number {
+  const A = bigrams(a);
+  const B = bigrams(b);
+  if (A.size === 0 || B.size === 0) return a === b ? 1 : 0;
+  let inter = 0;
+  for (const x of A) if (B.has(x)) inter++;
+  return inter / (A.size + B.size - inter);
+}
+
+function titleFromContent(content: string): string {
+  const fm = parseFrontmatter(content);
+  if (fm.title) return String(fm.title);
+  for (const line of content.split("\n")) if (line.startsWith("# ")) return line.slice(2).trim();
+  return "";
+}
+
+export interface SimilarDoc {
+  rel: string;
+  similarity: number;
+}
+
+/** Find existing docs similar to a proposed one (name/title/body), best first.
+ *  Reuses no LLM — bigram similarity over name, title, and a body prefix (F20). */
+export function findSimilar(
+  vault: string,
+  project: string,
+  doc: { name: string; title?: string; content?: string },
+  opts: { threshold?: number; limit?: number } = {}
+): SimilarDoc[] {
+  const threshold = opts.threshold ?? 0.3;
+  const propName = doc.name.replace(/\.md$/i, "");
+  const propTitle = doc.title || titleFromContent(doc.content || "");
+  const propBody = (doc.content || "").slice(0, 800);
+  const out: SimilarDoc[] = [];
+  for (const d of listDocs(vault, project)) {
+    const nameSim = textSimilarity(propName, d.name.replace(/\.md$/i, ""));
+    const titleSim = textSimilarity(propTitle, d.title);
+    const bodySim = textSimilarity(propBody, readBody(d.path).slice(0, 800));
+    const sim = 0.35 * nameSim + 0.35 * titleSim + 0.3 * bodySim;
+    if (sim >= threshold) out.push({ rel: d.rel, similarity: Math.round(sim * 100) / 100 });
+  }
+  return out.sort((a, b) => b.similarity - a.similarity).slice(0, opts.limit ?? 5);
+}
+
+/** Append content as a timestamped section to an existing doc (F20). */
+export function appendDoc(vault: string, project: string, rel: string, content: string): string {
+  const p = safePath(vault, project, rel);
+  if (!fs.existsSync(p) || !fs.statSync(p).isFile()) {
+    throw new DockyError(`Document not found: ${rel}`);
+  }
+  const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
+  const existing = fs.readFileSync(p, "utf-8").replace(/\s*$/, "");
+  fs.writeFileSync(p, `${existing}\n\n## 追加 ${stamp}\n\n${content}\n`, "utf-8");
+  autoCommitVault(vault, `append: ${rel}`);
+  return p;
+}
+
+/** A human/agent-readable merge preview keeping both sides (no auto-merge, F20). */
+export function mergePreview(vault: string, project: string, rel: string, content: string): string {
+  const existing = readDoc(vault, project, rel);
+  return `<<<<<<< 现有 ${rel}\n${existing}\n=======\n${content}\n>>>>>>> 新内容`;
+}
+
+/** Merge fields into a document's frontmatter, preserving the body (F22). */
+export function stampFrontmatter(content: string, fields: Record<string, unknown>): string {
+  const parsed = matter(content);
+  return matter.stringify(parsed.content, { ...(parsed.data as Record<string, unknown>), ...fields });
+}
+
+export type WriteMode = "new" | "append" | "merge" | "replace";
+
+export type WriteOutcome =
+  | { status: "written"; rel: string }
+  | { status: "appended"; rel: string }
+  | { status: "duplicate_suspected"; candidate: SimilarDoc; suggestion: string; hint: string }
+  | { status: "merge_preview"; rel: string; preview: string; hint: string };
+
+/**
+ * Agent-safe write (F20): in the default "new" mode, refuses to silently
+ * overwrite/duplicate — if the target name exists or a near-duplicate is found,
+ * returns a structured suggestion instead of writing. append/merge/replace are
+ * explicit. Human-side add/write are unaffected (handled by F10).
+ */
+export function smartWrite(
+  vault: string,
+  project: string,
+  docType: string,
+  name: string,
+  content: string,
+  mode: WriteMode = "new"
+): WriteOutcome {
+  validateType(docType);
+  const fileName = name.endsWith(".md") ? name : `${name}.md`;
+  const rel = `${docType}/${fileName}`;
+  const exists = docFileExists(vault, project, rel);
+  // Agent writes are stamped for the F22 review inbox.
+  const stamped = stampFrontmatter(content, { source: "agent", review: "pending" });
+
+  if (mode === "append") {
+    if (exists) {
+      appendDoc(vault, project, rel, content);
+      setReview(vault, project, rel, "pending"); // new agent content re-enters review
+      return { status: "appended", rel };
+    }
+    writeDoc(vault, project, docType, name, stamped);
+    return { status: "written", rel };
+  }
+  if (mode === "replace") {
+    if (exists) backupOverwrite(vault, project, rel); // back up old content first → undo-able (F10 consistency)
+    writeDoc(vault, project, docType, name, stamped);
+    return { status: "written", rel };
+  }
+  if (mode === "merge") {
+    const target = exists ? rel : findSimilar(vault, project, { name: fileName, content })[0]?.rel;
+    if (!target) {
+      writeDoc(vault, project, docType, name, stamped);
+      return { status: "written", rel };
+    }
+    return {
+      status: "merge_preview",
+      rel: target,
+      preview: mergePreview(vault, project, target, content),
+      hint: "确认后用 mode=replace 写入合并结果,或 mode=append 追加",
+    };
+  }
+
+  // mode "new": detect a same-name or near-duplicate conflict; never silent.
+  const similar = findSimilar(vault, project, { name: fileName, content });
+  const candidate: SimilarDoc | null = exists
+    ? { rel, similarity: 1 }
+    : similar.find((s) => s.rel !== rel) ?? null;
+  if (candidate) {
+    return {
+      status: "duplicate_suspected",
+      candidate,
+      suggestion: exists ? "replace" : "append",
+      hint: "再次调用并指定 mode=append|merge|replace 以继续",
+    };
+  }
+  writeDoc(vault, project, docType, name, stamped);
+  return { status: "written", rel };
+}
+
+// --------------------------------------------------------------------------- //
+// Agent-output review inbox (F22)
+// --------------------------------------------------------------------------- //
+/** Documents awaiting human review (source: agent, review: pending). */
+export function listPending(vault: string, project: string): DocInfo[] {
+  return listDocs(vault, project).filter((d) => d.review === "pending");
+}
+
+/** Set a document's review state by rewriting its frontmatter (F22). */
+export function setReview(vault: string, project: string, rel: string, state: string): string {
+  if (state !== "pending" && state !== "approved") {
+    throw new DockyError(`Invalid review state '${state}'. Allowed: pending, approved`);
+  }
+  const p = safePath(vault, project, rel);
+  if (!fs.existsSync(p) || !fs.statSync(p).isFile()) {
+    throw new DockyError(`Document not found: ${rel}`);
+  }
+  fs.writeFileSync(p, stampFrontmatter(fs.readFileSync(p, "utf-8"), { review: state }), "utf-8");
+  autoCommitVault(vault, `review(${rel}): ${state}`);
+  return p;
 }
 
 // --------------------------------------------------------------------------- //
@@ -949,6 +1302,41 @@ function forgetRel(vault: string, project: string, rel: string): void {
 }
 
 // --------------------------------------------------------------------------- //
+// REPL command history (F14)
+// --------------------------------------------------------------------------- //
+const HISTORY_FILE = ".docky-history";
+const HISTORY_MAX = 200;
+
+/** Load the project's REPL command history (oldest → newest). */
+export function loadHistory(vault: string, project: string): string[] {
+  try {
+    return fs.readFileSync(safePath(vault, project, HISTORY_FILE), "utf-8").split("\n").filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/** Append a command to the project's history (dedup consecutive, capped). */
+export function pushHistory(vault: string, project: string, cmd: string): void {
+  const c = cmd.trim();
+  if (!c) return;
+  let key: string;
+  try {
+    key = safePath(vault, project, HISTORY_FILE);
+  } catch {
+    return;
+  }
+  const hist = loadHistory(vault, project);
+  if (hist[hist.length - 1] === c) return; // skip immediate repeats
+  hist.push(c);
+  try {
+    fs.writeFileSync(key, hist.slice(-HISTORY_MAX).join("\n") + "\n", "utf-8");
+  } catch {
+    /* best-effort */
+  }
+}
+
+// --------------------------------------------------------------------------- //
 // Agent context bundle (F07)
 // --------------------------------------------------------------------------- //
 export interface ContextItem {
@@ -959,6 +1347,7 @@ export interface ContextItem {
   tags: string[];
   score: number;
   excerpt: string;
+  project?: string; // set for cross-project (granted, read-only) items (F15)
 }
 
 export interface ContextBundle {
@@ -995,7 +1384,7 @@ function firstParagraph(body: string): string {
 export function buildContext(
   vault: string,
   project: string,
-  opts: { query?: string; budget?: number } = {}
+  opts: { query?: string; budget?: number; across?: boolean } = {}
 ): ContextBundle {
   const query = (opts.query ?? "").trim();
   const all = listDocs(vault, project);
@@ -1101,8 +1490,67 @@ export function buildContext(
     if (candidates.length > MAX_ITEMS) truncatedBy = "count";
   }
 
+  // Cross-project (granted, read-only) aggregation — only when explicitly asked
+  // and a query is given. Each granted scope is searched in its own scope (F15).
+  if (opts.across && query) {
+    let crossCount = 0;
+    for (const sc of resolveScopes(vault, project).filter((s) => s.readonly)) {
+      for (const h of searchDocs(vault, sc.project, query, sc.type, {}, {}).slice(0, 3)) {
+        const slash = h.rel.indexOf("/");
+        items.push({
+          rel: h.rel,
+          type: slash >= 0 ? h.rel.slice(0, slash) : h.rel,
+          status: "active",
+          title: h.title,
+          tags: [],
+          score: h.score,
+          excerpt: h.snippet,
+          project: sc.project,
+        });
+        crossCount++;
+      }
+    }
+    if (crossCount) noteParts.push(`含 ${crossCount} 篇跨项目(只读)`);
+  }
+
   if (archivedCount > 0) noteParts.unshift(`已排除 ${archivedCount} 篇 archived`);
   return { project, items, truncatedBy, note: noteParts.length ? noteParts.join(";") : null };
+}
+
+// --------------------------------------------------------------------------- //
+// Document links & backlinks (F12)
+// --------------------------------------------------------------------------- //
+function readBody(filePath: string): string {
+  try {
+    return fs.readFileSync(filePath, "utf-8");
+  } catch {
+    return "";
+  }
+}
+
+/** Map of every doc's rel → its body text, for the current project. */
+function projectBodies(docs: DocInfo[]): Map<string, string> {
+  return new Map(docs.map((d) => [d.rel, readBody(d.path)]));
+}
+
+export interface DocLinks {
+  outlinks: ResolvedLink[]; // links this doc points at (rel null = broken)
+  backlinks: string[]; // rels of docs that link to this one
+  broken: string[]; // raw link targets that did not resolve in-scope
+}
+
+/** Resolve a doc's outgoing links, incoming backlinks, and broken links (F12). */
+export function getLinks(vault: string, project: string, rel: string): DocLinks {
+  const p = safePath(vault, project, rel);
+  if (!fs.existsSync(p) || !fs.statSync(p).isFile()) {
+    throw new DockyError(`Document not found: ${rel}`);
+  }
+  const docs = listDocs(vault, project);
+  const bodies = projectBodies(docs);
+  const outlinks = outlinksOf(docs, bodies.get(rel) ?? readBody(p));
+  const broken = outlinks.filter((o) => o.rel === null).map((o) => o.raw);
+  const backlinks = buildBacklinks(docs, bodies).get(rel) ?? [];
+  return { outlinks, backlinks, broken };
 }
 
 // --------------------------------------------------------------------------- //
@@ -1129,6 +1577,21 @@ export function generateIndex(vault: string, project: string): string {
     }
     lines.push("");
   }
+
+  // Relationships + broken links (F12).
+  const allDocs = listDocs(vault, project);
+  const bodies = projectBodies(allDocs);
+  const rels: string[] = [];
+  const broken: string[] = [];
+  for (const d of allDocs) {
+    const outs = outlinksOf(allDocs, bodies.get(d.rel) ?? "");
+    const ok = outs.filter((o) => o.rel).map((o) => o.rel as string);
+    if (ok.length) rels.push(`- [${d.title}](${d.rel}) → ${ok.join(", ")}`);
+    for (const b of outs.filter((o) => !o.rel)) broken.push(`- ⚠ ${d.rel} → \`[[${b.raw}]]\``);
+  }
+  if (rels.length) lines.push("## 关系", "", ...rels, "");
+  if (broken.length) lines.push("## ⚠ 失效链接", "", ...broken, "");
+
   const base = projectDir(vault, project);
   fs.mkdirSync(base, { recursive: true });
   const index = path.join(base, "INDEX.md");
