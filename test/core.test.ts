@@ -21,6 +21,12 @@ afterEach(() => {
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
+/** rel of a smartWrite outcome that actually wrote/appended (narrows the union). */
+function wroteRel(o: core.WriteOutcome): string {
+  if (o.status === "written" || o.status === "appended") return o.rel;
+  throw new Error(`expected a write, got: ${JSON.stringify(o)}`);
+}
+
 function mkRepo(p: string, branch = "main"): string {
   fs.mkdirSync(p, { recursive: true });
   execFileSync("git", ["init", "-q", "-b", branch], { cwd: p });
@@ -715,28 +721,29 @@ describe("agent review inbox (F22)", () => {
   beforeEach(() => core.registerProject(vault, "p", path.join(tmp, "p")));
 
   it("stamps agent writes as source:agent / review:pending; human writes are not", () => {
-    core.smartWrite(vault, "p", "debug", "agentdoc", "# Agent Doc\nbody");
+    const rel = wroteRel(core.smartWrite(vault, "p", "debug", "agentdoc", "# Agent Doc\nbody"));
     core.writeDoc(vault, "p", "design", "humandoc", "# Human Doc\nbody"); // human path
-    const agent = core.listDocs(vault, "p").find((d) => d.name === "agentdoc.md")!;
+    const agent = core.listDocs(vault, "p").find((d) => d.rel === rel)!;
+    expect(agent.name).toMatch(/^\d{4}-\d{2}-\d{2}-\d{4}-agentdoc\.md$/); // date-stamped (F20)
     expect(agent.source).toBe("agent");
     expect(agent.review).toBe("pending");
     expect(core.listDocs(vault, "p").find((d) => d.name === "humandoc.md")!.review).toBeUndefined();
   });
 
   it("listPending returns only pending docs", () => {
-    core.smartWrite(vault, "p", "debug", "p1", "# Alpha\nlorem ipsum content here");
-    core.smartWrite(vault, "p", "debug", "p2", "# Beta\ntotally different words zzz");
+    const a = wroteRel(core.smartWrite(vault, "p", "debug", "p1", "# Alpha\nlorem ipsum content here"));
+    const b = wroteRel(core.smartWrite(vault, "p", "debug", "p2", "# Beta\ntotally different words zzz"));
     core.writeDoc(vault, "p", "design", "h", "# H\nbody");
-    expect(core.listPending(vault, "p").map((d) => d.rel).sort()).toEqual(["debug/p1.md", "debug/p2.md"]);
+    expect(core.listPending(vault, "p").map((d) => d.rel).sort()).toEqual([a, b].sort());
   });
 
   it("setReview approved removes a doc from the inbox, preserving the body", () => {
-    core.smartWrite(vault, "p", "debug", "x", "# X\nimportant body");
-    expect(core.listPending(vault, "p").some((d) => d.rel === "debug/x.md")).toBe(true);
-    core.setReview(vault, "p", "debug/x.md", "approved");
-    expect(core.listPending(vault, "p").some((d) => d.rel === "debug/x.md")).toBe(false);
-    expect(core.listDocs(vault, "p").find((d) => d.name === "x.md")!.review).toBe("approved");
-    expect(core.readDoc(vault, "p", "debug/x.md")).toContain("important body");
+    const rel = wroteRel(core.smartWrite(vault, "p", "debug", "x", "# X\nimportant body"));
+    expect(core.listPending(vault, "p").some((d) => d.rel === rel)).toBe(true);
+    core.setReview(vault, "p", rel, "approved");
+    expect(core.listPending(vault, "p").some((d) => d.rel === rel)).toBe(false);
+    expect(core.listDocs(vault, "p").find((d) => d.rel === rel)!.review).toBe("approved");
+    expect(core.readDoc(vault, "p", rel)).toContain("important body");
   });
 
   it("setReview rejects an invalid state", () => {
@@ -772,8 +779,10 @@ describe("smart write: dedupe / append / merge (F20)", () => {
   });
 
   it("smartWrite 'new' writes when there's no conflict", () => {
-    expect(core.smartWrite(vault, "p", "debug", "fresh", "# Fresh\nbody").status).toBe("written");
-    expect(core.listDocs(vault, "p").some((d) => d.name === "fresh.md")).toBe(true);
+    const r = core.smartWrite(vault, "p", "debug", "fresh", "# Fresh\nbody");
+    expect(r.status).toBe("written");
+    if (r.status === "written") expect(r.rel).toMatch(/^debug\/\d{4}-\d{2}-\d{2}-\d{4}-fresh\.md$/);
+    expect(core.listDocs(vault, "p").some((d) => d.name.endsWith("-fresh.md"))).toBe(true);
   });
 
   it("smartWrite 'new' refuses to silently overwrite a same-named doc", () => {
@@ -811,5 +820,125 @@ describe("smart write: dedupe / append / merge (F20)", () => {
     expect(core.readDoc(vault, "p", "debug/x.md")).toContain("replaced content");
     core.undo(vault, "p"); // F10 undo of the forced overwrite
     expect(core.readDoc(vault, "p", "debug/x.md")).toContain("original content"); // restored
+  });
+});
+
+describe("agent date-stamped doc names (F20)", () => {
+  beforeEach(() => core.registerProject(vault, "p", path.join(tmp, "p")));
+
+  it("datePrefixed prepends YYYY-MM-DD-HHmm and is idempotent on already-dated names", () => {
+    expect(core.datePrefixed("auth-redesign")).toMatch(/^\d{4}-\d{2}-\d{2}-\d{4}-auth-redesign$/);
+    expect(core.datePrefixed("2026-06-23-1430-auth")).toBe("2026-06-23-1430-auth"); // HHmm form kept
+    expect(core.datePrefixed("2026-06-23-auth")).toBe("2026-06-23-auth"); // date-only form kept
+  });
+
+  it("smartWrite 'new' date-stamps the created file and stores it at the dated rel", () => {
+    const r = core.smartWrite(vault, "p", "debug", "auth-redesign", "# Auth\nbody");
+    expect(r.status).toBe("written");
+    if (r.status === "written") {
+      expect(r.rel).toMatch(/^debug\/\d{4}-\d{2}-\d{2}-\d{4}-auth-redesign\.md$/);
+      expect(core.readDoc(vault, "p", r.rel)).toContain("body"); // lives at the dated rel
+    }
+  });
+
+  it("does not double-stamp a name the agent already dated", () => {
+    const r = core.smartWrite(vault, "p", "debug", "2026-01-02-0900-incident", "# Incident\nbody");
+    expect(r.status).toBe("written");
+    if (r.status === "written") expect(r.rel).toBe("debug/2026-01-02-0900-incident.md");
+  });
+
+  it("replace of an existing doc keeps its name (no re-stamp)", () => {
+    core.writeDoc(vault, "p", "debug", "x", "# X\noriginal"); // human, undated
+    const r = core.smartWrite(vault, "p", "debug", "x", "# X\nreplaced", "replace");
+    expect(r.status).toBe("written");
+    if (r.status === "written") expect(r.rel).toBe("debug/x.md"); // unchanged
+    expect(core.readDoc(vault, "p", "debug/x.md")).toContain("replaced");
+  });
+});
+
+describe("branch-scoped isolation (F56)", () => {
+  function enableBranchScope(): void {
+    const cfg = loadConfig(vault);
+    cfg.branchScope = true;
+    saveConfig(vault, cfg);
+  }
+
+  it("branchSegment sanitizes a branch into one safe path segment", () => {
+    expect(core.branchSegment("main")).toBe("main");
+    expect(core.branchSegment("feat/ultra-update")).toBe("feat-ultra-update");
+    expect(core.branchSegment("release/1.2.x")).toBe("release-1.2.x");
+    expect(core.branchSegment(null)).toBe(core.DEFAULT_BRANCH_BUCKET);
+    expect(core.branchSegment("   ")).toBe(core.DEFAULT_BRANCH_BUCKET);
+    // a branch named like a doc type is suffixed so it can't collide with a type dir
+    expect(core.branchSegment("design")).toBe("design-branch");
+  });
+
+  it("scopedProject is the identity when off, a branch bucket when on", () => {
+    expect(core.scopedProject(vault, "p", "main")).toBe("p"); // off by default
+    enableBranchScope();
+    expect(core.scopedProject(vault, "p", "main")).toBe("p/main");
+    expect(core.scopedProject(vault, "p", "feat/x")).toBe("p/feat-x");
+    expect(core.scopedProject(vault, "p", null)).toBe(`p/${core.DEFAULT_BRANCH_BUCKET}`);
+  });
+
+  it("an agent on branch A never reads branch B's docs", () => {
+    enableBranchScope();
+    const a = core.scopedProject(vault, "p", "branch-a");
+    const b = core.scopedProject(vault, "p", "branch-b");
+    core.writeDoc(vault, a, "design", "secret-a", "# A\nonly on A");
+    core.writeDoc(vault, b, "design", "secret-b", "# B\nonly on B");
+
+    expect(core.listDocs(vault, a).map((d) => d.name)).toEqual(["secret-a.md"]);
+    expect(core.listDocs(vault, b).map((d) => d.name)).toEqual(["secret-b.md"]);
+    // a doc from branch A is simply not in branch B's scope
+    expect(() => core.readDoc(vault, b, "design/secret-a.md")).toThrow(/not found/i);
+    // and they live in physically separate directories
+    const base = path.join(vault, "projects", "p");
+    expect(fs.existsSync(path.join(base, "branch-a", "design", "secret-a.md"))).toBe(true);
+    expect(fs.existsSync(path.join(base, "branch-b", "design", "secret-a.md"))).toBe(false);
+  });
+
+  it("smartWrite dedupe, search, and buildContext stay within the branch bucket", () => {
+    enableBranchScope();
+    const a = core.scopedProject(vault, "p", "branch-a");
+    const b = core.scopedProject(vault, "p", "branch-b");
+    core.smartWrite(vault, a, "debug", "issue", "# 登录排查\nsession 丢失导致登录失败");
+    // the same doc on branch B is NOT flagged as a duplicate of branch A's (isolated)
+    const r = core.smartWrite(vault, b, "debug", "issue", "# 登录排查\nsession 丢失导致登录失败");
+    expect(r.status).toBe("written");
+    expect(core.searchDocs(vault, a, "session").length).toBe(1);
+    expect(core.buildContext(vault, "p", { query: "session", branch: "branch-a" }).items.length).toBe(1);
+    expect(core.buildContext(vault, "p", { query: "session", branch: "branch-b" }).items.length).toBe(1);
+  });
+
+  it("migrate moves legacy docs into the branch bucket, idempotently", () => {
+    // legacy docs written before enabling branchScope (bare projects/<name>/<type>/)
+    core.writeDoc(vault, "p", "design", "legacy", "# Legacy\nbody");
+    core.writeDoc(vault, "p", "plan", "roadmap", "# Roadmap");
+    enableBranchScope();
+    // before migration the branch scope is empty (legacy docs are invisible)
+    expect(core.listDocs(vault, core.scopedProject(vault, "p", "main")).length).toBe(0);
+
+    const r = core.migrateBranchScope(vault, "p", "main");
+    expect(r.bucket).toBe("main");
+    expect(r.moved.sort()).toEqual(["design", "plan"]);
+    expect(core.listDocs(vault, "p/main").map((d) => d.rel).sort()).toEqual([
+      "design/legacy.md",
+      "plan/roadmap.md",
+    ]);
+    // the legacy bare-level type dir is gone
+    expect(fs.existsSync(path.join(vault, "projects", "p", "design", "legacy.md"))).toBe(false);
+    // running it again moves nothing
+    expect(core.migrateBranchScope(vault, "p", "main").moved).toEqual([]);
+  });
+
+  it("migrate never swallows an already-migrated branch bucket", () => {
+    core.writeDoc(vault, "p", "design", "x", "# X");
+    enableBranchScope();
+    core.migrateBranchScope(vault, "p", "main"); // → projects/p/main/design/x.md
+    // migrating a different branch must not move the existing 'main' bucket
+    const r = core.migrateBranchScope(vault, "p", "feature");
+    expect(r.moved).toEqual([]);
+    expect(fs.existsSync(path.join(vault, "projects", "p", "main", "design", "x.md"))).toBe(true);
   });
 });

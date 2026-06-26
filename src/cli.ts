@@ -49,8 +49,8 @@ function requireInit(v: string): void {
   }
 }
 
-/** Explicit --project wins, else auto-infer from cwd. */
-function resolve(v: string, project?: string): string {
+/** Bare project name. Explicit --project wins, else auto-infer from cwd. */
+function resolveBare(v: string, project?: string): string {
   if (project) {
     if (!(project in listProjects(v))) fail(`Unknown project: ${project}`);
     return project;
@@ -61,6 +61,16 @@ function resolve(v: string, project?: string): string {
     const name = core.inferRepoName(process.cwd());
     fail(`当前目录未注册到 docky。\n  → 运行:docky register ${name}      # 已按仓库名预填`);
   }
+}
+
+/**
+ * Branch-scoped project key for filesystem ops (F56). When branchScope is on it
+ * returns "<project>/<branch>" (branch from cwd's git); otherwise the bare name,
+ * so every command that uses this is unchanged when the flag is off. Config /
+ * cross-project commands (grant/revoke/search --across) use resolveBare instead.
+ */
+function resolve(v: string, project?: string): string {
+  return core.scopedProject(v, resolveBare(v, project), core.gitBranch(process.cwd()));
 }
 
 function ok(msg: string): void {
@@ -322,9 +332,11 @@ program
   .action((query: string, opts: { project?: string; type?: string; fuzzy?: boolean; across?: boolean }) => {
     const v = vault();
     requireInit(v);
-    const proj = resolve(v, opts.project);
+    const bare = resolveBare(v, opts.project);
+    const branch = core.gitBranch(process.cwd());
     if (opts.across) {
-      const hits = guard(() => core.searchAcross(v, proj, query, { type: opts.type, fuzzy: Boolean(opts.fuzzy) }));
+      // Cross-project search resolves grants by bare name; each scope searched in its own branch (F56).
+      const hits = guard(() => core.searchAcross(v, bare, query, { type: opts.type, fuzzy: Boolean(opts.fuzzy), branch }));
       if (hits.length === 0) {
         console.log(`No matches for '${query}'.`);
         return;
@@ -336,6 +348,7 @@ program
       }
       return;
     }
+    const proj = core.scopedProject(v, bare, branch);
     const hits = guard(() => core.searchDocs(v, proj, query, opts.type, {}, { fuzzy: Boolean(opts.fuzzy) }));
     if (hits.length === 0) {
       console.log(`No matches for '${query}' in ${proj}.`);
@@ -354,7 +367,7 @@ program
   .action((target: string, opts: { project?: string }) => {
     const v = vault();
     requireInit(v);
-    const proj = resolve(v, opts.project);
+    const proj = resolveBare(v, opts.project); // grants are project-level, not branch-scoped
     guard(() => core.addGrant(v, proj, target));
     ok(`Granted ${proj} → ${target} (read-only)`);
   });
@@ -366,9 +379,30 @@ program
   .action((target: string, opts: { project?: string }) => {
     const v = vault();
     requireInit(v);
-    const proj = resolve(v, opts.project);
+    const proj = resolveBare(v, opts.project); // grants are project-level, not branch-scoped
     guard(() => core.revokeGrant(v, proj, target));
     ok(`Revoked ${proj} → ${target}`);
+  });
+
+program
+  .command("migrate-branch-scope")
+  .description("F56: move a project's legacy docs into a branch bucket projects/<name>/<branch>/.")
+  .option("-p, --project <name>")
+  .option("-b, --branch <branch>", "Target branch bucket (default: current git branch).")
+  .action((opts: { project?: string; branch?: string }) => {
+    const v = vault();
+    requireInit(v);
+    if (!core.branchScopeEnabled(v)) {
+      console.log("提示:branchScope 尚未开启 —— 先 `docky config set branchScope true` 再迁移。");
+    }
+    const proj = resolveBare(v, opts.project);
+    const branch = opts.branch ?? core.gitBranch(process.cwd());
+    const r = guard(() => core.migrateBranchScope(v, proj, branch));
+    if (r.moved.length === 0) {
+      ok(`${proj}: 无需迁移(已在分支桶 ${r.bucket} 或无遗留文档)`);
+    } else {
+      ok(`已迁移 ${proj} → ${r.bucket}/(${r.moved.length} 项: ${r.moved.join(", ")})`);
+    }
   });
 
 program
@@ -737,7 +771,7 @@ program
   .action((opts: { project?: string }) => {
     const v = vault();
     requireInit(v);
-    const proj = resolve(v, opts.project);
+    const proj = resolveBare(v, opts.project); // symlink points at the whole project dir
     const link = guard(() => core.linkProject(v, proj));
     ok(`Linked ${link}`);
   });
@@ -749,7 +783,7 @@ program
   .action((opts: { project?: string }) => {
     const v = vault();
     requireInit(v);
-    const proj = resolve(v, opts.project);
+    const proj = resolveBare(v, opts.project); // symlink points at the whole project dir
     guard(() => core.unlinkProject(v, proj));
     ok(`Unlinked docs for ${proj}`);
   });
@@ -851,7 +885,8 @@ program
     try {
       const ctx = core.resolveProject(v, process.cwd());
       console.log(`project: \x1b[1m\x1b[36m${ctx.project}\x1b[0m`);
-      console.log(`branch:  ${ctx.branch ?? "-"}`);
+      console.log(`branch:  ${ctx.branch ?? "-"}${core.branchScopeEnabled(v) ? " \x1b[33m(isolated · F56)\x1b[0m" : ""}`);
+      if (core.branchScopeEnabled(v)) console.log(`scope:   ${core.scopedProject(v, ctx.project, ctx.branch)}`);
       console.log(`matched: ${ctx.root}`);
     } catch (e) {
       fail((e as Error).message);

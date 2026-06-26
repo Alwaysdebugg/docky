@@ -92,6 +92,12 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
   const { write } = useStdout();
   const [clearKey, setClearKey] = useState(0);
   const [project, setProject] = useState<string | null>(initialProject);
+  // F56: a TUI session is tied to one cwd, so the branch is fixed. scoped()
+  // maps the current project to its branch bucket for filesystem ops; it is the
+  // bare name when branchScope is off, so it's safe to use wherever a project
+  // path is needed. Config / cross-project calls keep the bare `project`.
+  const [branch] = useState<string | null>(() => core.gitBranch(process.cwd()));
+  const scoped = (p: string): string => core.scopedProject(vault, p, branch);
   const [history, setHistory] = useState<HistItem[]>(
     welcomeItems().map((l) => ({ ...l, key: LINE_KEY++ }))
   );
@@ -162,7 +168,10 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
   const [importDir, setImportDir] = useState("");
 
   const suggestions = suggest(value);
-  const argList = suggestions.length === 0 && value.startsWith("/") ? suggestArgs(vault, project, value) : [];
+  const argList =
+    suggestions.length === 0 && value.startsWith("/")
+      ? suggestArgs(vault, project ? scoped(project) : null, value)
+      : [];
   const menuWidth = Math.min((process.stdout.columns || 80) - 4, 76);
   const sel = suggestions.length > 0 ? Math.min(selected, suggestions.length - 1) : 0;
   const aSel = argList.length > 0 ? Math.min(argSel, argList.length - 1) : 0;
@@ -269,9 +278,9 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
     }
     const name = args.slice(1).join(" ") || undefined;
     try {
-      const dest = core.scaffold(vault, project, args[0], name);
+      const dest = core.scaffold(vault, scoped(project), args[0], name);
       const rel = dest.split(/[\\/]/).slice(-2).join("/");
-      core.recordOpen(vault, project, rel);
+      core.recordOpen(vault, scoped(project), rel);
       append([{ text: `已创建草稿 ${rel}(status: draft)`, level: "ok" }]);
       openExternally(dest);
     } catch (e) {
@@ -287,7 +296,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
       return;
     }
     try {
-      core.removeDoc(vault, project, rel);
+      core.removeDoc(vault, scoped(project), rel);
       append([{ text: `已移入回收站 ${rel}(可 /undo 或 /restore)`, level: "ok" }]);
     } catch (e) {
       const msg = e instanceof DockyError ? e.message : `错误: ${(e as Error).message}`;
@@ -306,7 +315,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
       return;
     }
     try {
-      const diff = core.diffDoc(vault, project, args[0], args[1], args[2]);
+      const diff = core.diffDoc(vault, scoped(project), args[0], args[1], args[2]);
       if (!diff.trim()) {
         append([{ text: "› /diff " + args.join(" "), level: "in" }, { text: "(无差异)", level: "info" }]);
         return;
@@ -329,7 +338,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
       append([{ text: "› /open " + rel, level: "in" }, { text: "当前没有选中项目,用 /use 切换。", level: "err" }]);
       return;
     }
-    openDoc(project, rel);
+    openDoc(scoped(project), rel);
   }
 
   /** Enter the interactive, hierarchical document browser. `args` accepts the
@@ -343,7 +352,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
     const f = parseListArgs(args);
     let docs: DocInfo[];
     try {
-      docs = core.filterDocs(core.listDocs(vault, project, f.type), {
+      docs = core.filterDocs(core.listDocs(vault, scoped(project), f.type), {
         status: f.status,
         tag: f.tag,
         stale: f.stale,
@@ -378,7 +387,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
       append([{ text: "› /graph", level: "in" }, { text: "当前没有选中项目,用 /use 切换。", level: "err" }]);
       return;
     }
-    const lines = graphLines(buildGraph(vault, project));
+    const lines = graphLines(buildGraph(vault, scoped(project)));
     setGraphItems(lines);
     setGraphSel(lines.findIndex((l) => l.rel) >= 0 ? lines.findIndex((l) => l.rel) : 0);
     setMode("graph");
@@ -390,7 +399,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
       append([{ text: "› /inbox", level: "in" }, { text: "当前没有选中项目,用 /use 切换。", level: "err" }]);
       return;
     }
-    const pending = core.listPending(vault, project);
+    const pending = core.listPending(vault, scoped(project));
     if (pending.length === 0) {
       append([{ text: "› /inbox", level: "in" }, { text: "收件箱为空(无待审文档)", level: "info" }]);
       return;
@@ -414,7 +423,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
       setMode("repl");
       return;
     }
-    const pending = core.listPending(vault, project);
+    const pending = core.listPending(vault, scoped(project));
     setInboxSelected(new Set());
     if (pending.length === 0) {
       setMode("repl");
@@ -430,7 +439,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
     let n = 0;
     for (const rel of rels) {
       try {
-        core.setReview(vault, project, rel, "approved");
+        core.setReview(vault, scoped(project), rel, "approved");
         n++;
       } catch {
         /* skip */
@@ -445,7 +454,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
     let n = 0;
     for (const rel of rels) {
       try {
-        core.removeDoc(vault, project, rel);
+        core.removeDoc(vault, scoped(project), rel);
         n++;
       } catch {
         /* skip */
@@ -460,7 +469,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
       append([{ text: "› /doctor", level: "in" }, { text: "当前没有选中项目,用 /use 切换。", level: "err" }]);
       return;
     }
-    const issues = lintProject(vault, project);
+    const issues = lintProject(vault, scoped(project));
     if (issues.length === 0) {
       append([{ text: "› /doctor", level: "in" }, { text: "✓ 文档库健康,无问题", level: "ok" }]);
       return;
@@ -500,13 +509,13 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
     }
     let links;
     try {
-      links = core.getLinks(vault, project, rel);
+      links = core.getLinks(vault, scoped(project), rel);
     } catch (e) {
       const msg = e instanceof DockyError ? e.message : `错误: ${(e as Error).message}`;
       append([{ text: "› /links " + rel, level: "in" }, { text: msg, level: "err" }]);
       return;
     }
-    const byRel = new Map(core.listDocs(vault, project).map((d) => [d.rel, d]));
+    const byRel = new Map(core.listDocs(vault, scoped(project)).map((d) => [d.rel, d]));
     const outRels = links.outlinks.filter((o) => o.rel).map((o) => o.rel as string);
     const ordered: DocInfo[] = [];
     const seen = new Set<string>();
@@ -554,13 +563,13 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
       let res;
       let summary = "";
       if (kind === "move") {
-        res = core.batchMove(vault, project, rels, a, { force: false });
+        res = core.batchMove(vault, scoped(project), rels, a, { force: false });
         summary = `已移动 ${res.ok.length} 篇 → ${a}`;
       } else if (kind === "status") {
-        res = core.batchSetStatus(vault, project, rels, a);
+        res = core.batchSetStatus(vault, scoped(project), rels, a);
         summary = `已将 ${res.ok.length} 篇设为 ${a.toLowerCase()}`;
       } else {
-        res = core.batchAddTags(vault, project, rels, a.split(/[\s,]+/).filter(Boolean));
+        res = core.batchAddTags(vault, scoped(project), rels, a.split(/[\s,]+/).filter(Boolean));
         summary = `已为 ${res.ok.length} 篇打标 #${a}`;
       }
       const errs = res.errors.length ? `(${res.errors.length} 失败)` : "";
@@ -609,8 +618,8 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
     let hits: SearchHit[];
     try {
       hits = across
-        ? core.searchAcross(vault, project, query, { type, fuzzy })
-        : core.searchDocs(vault, project, query, type, {}, { fuzzy });
+        ? core.searchAcross(vault, project, query, { type, fuzzy, branch })
+        : core.searchDocs(vault, scoped(project), query, type, {}, { fuzzy });
     } catch (e) {
       const msg = e instanceof DockyError ? e.message : `错误: ${(e as Error).message}`;
       append([{ text: echo, level: "in" }, { text: msg, level: "err" }]);
@@ -636,7 +645,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
     }
     let docs: DocInfo[];
     try {
-      docs = core.listDocs(vault, project);
+      docs = core.listDocs(vault, scoped(project));
     } catch (e) {
       const msg = e instanceof DockyError ? e.message : `错误: ${(e as Error).message}`;
       append([{ text: "› /o", level: "in" }, { text: msg, level: "err" }]);
@@ -647,7 +656,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
       return;
     }
     // Empty-query default ordering: pinned first, then most-recent (F04).
-    const ranked = [...core.getPins(vault, project), ...core.getRecents(vault, project)];
+    const ranked = [...core.getPins(vault, scoped(project)), ...core.getRecents(vault, scoped(project))];
     const rank = new Map<string, number>();
     ranked.forEach((rel, i) => {
       if (!rank.has(rel)) rank.set(rel, i);
@@ -665,12 +674,12 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
       append([{ text: "› /f", level: "in" }, { text: "当前没有选中项目,用 /use 切换。", level: "err" }]);
       return;
     }
-    const query = getFolder(vault, project, name);
+    const query = getFolder(vault, scoped(project), name);
     if (query === null) {
       append([{ text: "› /f " + name, level: "in" }, { text: `没有名为「${name}」的智能文件夹`, level: "err" }]);
       return;
     }
-    const docs = evalFolder(vault, project, query);
+    const docs = evalFolder(vault, scoped(project), query);
     if (docs.length === 0) {
       append([{ text: "› /f " + name, level: "in" }, { text: `📂 ${name}(${query})— 无匹配`, level: "info" }]);
       return;
@@ -688,10 +697,10 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
       append([{ text: "› /recent", level: "in" }, { text: "当前没有选中项目,用 /use 切换。", level: "err" }]);
       return;
     }
-    const byRel = new Map(core.listDocs(vault, project).map((d) => [d.rel, d]));
+    const byRel = new Map(core.listDocs(vault, scoped(project)).map((d) => [d.rel, d]));
     const ordered: DocInfo[] = [];
     const seen = new Set<string>();
-    for (const rel of [...core.getPins(vault, project), ...core.getRecents(vault, project)]) {
+    for (const rel of [...core.getPins(vault, scoped(project)), ...core.getRecents(vault, scoped(project))]) {
       if (seen.has(rel)) continue;
       const d = byRel.get(rel);
       if (d) {
@@ -774,7 +783,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
     try {
       const results = applyImport(
         vault,
-        project!,
+        scoped(project!),
         toImport.map((i) => ({ src: i.src, type: i.type, tags: importTags })),
         { move: importMove, frontmatter: true }
       );
@@ -830,7 +839,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
     setCmdHist((h) => (h[h.length - 1] === c ? h : [...h, c]));
     if (project) {
       try {
-        core.pushHistory(vault, project, c);
+        core.pushHistory(vault, scoped(project), c);
       } catch {
         /* best-effort */
       }
@@ -884,7 +893,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
       return;
     }
     if (c.toLowerCase() === "outline" && a[0]) {
-      if (project) enterOutline(project, a[0]);
+      if (project) enterOutline(scoped(project), a[0]);
       else append([{ text: "› /outline", level: "in" }, { text: "当前没有选中项目,用 /use 切换。", level: "err" }]);
       setValue("");
       return;
@@ -981,12 +990,12 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
       else if (key.downArrow) setResultSel((s) => Math.min(resultHits.length - 1, s + 1));
       else if (key.return) {
         const h = resultHits[resultSel];
-        if (h && project) openDoc(h.project ?? project, h.rel, h.line || undefined);
+        if (h && project) openDoc(scoped(h.project ?? project), h.rel, h.line || undefined);
       } else if (input === "e") {
         const h = resultHits[resultSel];
         if (h && project) {
           try {
-            openExternally(core.safePath(vault, h.project ?? project, h.rel), h.line || undefined);
+            openExternally(core.safePath(vault, scoped(h.project ?? project), h.rel), h.line || undefined);
             append([{ text: `已用编辑器打开 ${h.rel}${h.line ? ":" + h.line : ""}`, level: "ok" }]);
           } catch (e) {
             append([{ text: `错误: ${(e as Error).message}`, level: "err" }]);
@@ -1005,7 +1014,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
         const it = graphItems[graphSel];
         if (it && it.rel && project) {
           setMode("repl");
-          openDoc(project, it.rel);
+          openDoc(scoped(project), it.rel);
         }
       } else if (key.escape || input === "q") {
         setMode("repl");
@@ -1027,7 +1036,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
       } else if (input === "a") setInboxSelected(new Set(inboxDocs.map((d) => d.rel)));
       else if (key.return) {
         const d = inboxDocs[inboxSel];
-        if (d && project) openDoc(project, d.rel);
+        if (d && project) openDoc(scoped(project), d.rel);
       } else if (input === "y") approveInbox();
       else if (input === "x") returnInbox();
       else if (input === "e") {
@@ -1047,7 +1056,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
         const it = doctorIssues[doctorSel];
         if (it && it.rel && project) {
           setMode("repl");
-          openDoc(project, it.rel);
+          openDoc(scoped(project), it.rel);
         }
       } else if (key.escape || input === "q") {
         setMode("repl");
@@ -1077,7 +1086,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
           setMode("repl");
           if (project && rels.length) {
             try {
-              const res = core.batchRemove(vault, project, rels);
+              const res = core.batchRemove(vault, scoped(project), rels);
               append([{ text: `已移入回收站 ${res.ok.length} 篇(可 /undo)`, level: "ok" }]);
             } catch (e) {
               append([{ text: `错误: ${(e as Error).message}`, level: "err" }]);
@@ -1355,7 +1364,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
   useEffect(() => {
     if (project) {
       try {
-        setCmdHist(core.loadHistory(vault, project));
+        setCmdHist(core.loadHistory(vault, scoped(project)));
       } catch {
         /* history is best-effort */
       }
@@ -1368,9 +1377,9 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
 
   // Homepage springboard: on a fresh REPL screen, surface pins + recents (F04).
   const atHome = mode === "repl" && value === "" && suggestions.length === 0 && history.length <= 1;
-  const homePins = atHome && project ? core.getPins(vault, project) : [];
-  const homeRecents = atHome && project ? core.getRecents(vault, project) : [];
-  const homeFolders = atHome && project ? listFolders(vault, project) : [];
+  const homePins = atHome && project ? core.getPins(vault, scoped(project)) : [];
+  const homeRecents = atHome && project ? core.getRecents(vault, scoped(project)) : [];
+  const homeFolders = atHome && project ? listFolders(vault, scoped(project)) : [];
   const showHome = homePins.length > 0 || homeRecents.length > 0 || homeFolders.length > 0;
   // Onboarding / self-heal card when there's no active project (F05).
   const scope = atHome && !project ? core.detectScope(vault, process.cwd()) : null;
@@ -1533,7 +1542,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
                 const d = quickList[Math.min(quickSel, quickList.length - 1)];
                 if (d && project) {
                   setMode("repl");
-                  openDoc(project, d.rel);
+                  openDoc(scoped(project), d.rel);
                 }
               }}
               placeholder="输入关键词模糊匹配文档名/标题/类型"

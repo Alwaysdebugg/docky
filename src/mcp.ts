@@ -37,19 +37,36 @@ function fail(e: unknown) {
   return { content: [{ type: "text" as const, text: msg }], isError: true };
 }
 
+// Branch isolation key (F56). Optional everywhere: when this vault has
+// branchScope enabled, it scopes the call to projects/<name>/<branch>/ — get it
+// from resolve_project and pass it back. Omitted/empty → the '_default' bucket.
+// When branchScope is off it is ignored, so it is always safe to send.
+const BRANCH_ARG = z
+  .string()
+  .optional()
+  .describe("Branch isolation key (F56) from resolve_project. Omit if unknown → '_default' bucket.");
+
 server.registerTool(
   "resolve_project",
   {
     description:
       "Infer the project that owns a working directory (via path + git branch). " +
       "Returns {project, branch, matched}. Throws if the directory is not registered — " +
-      "the server never falls back to a global scope.",
+      "the server never falls back to a global scope. When this vault has branch " +
+      "isolation enabled (F56), `branch` is the read/write isolation key: pass it back " +
+      "to the other tools so an agent on branch A never sees branch B's docs. " +
+      "branchScope reports whether that isolation is active.",
     inputSchema: { cwd: z.string().describe("Absolute working directory path.") },
   },
   async ({ cwd }) => {
     try {
       const ctx = core.resolveProject(vault(), cwd);
-      return text({ project: ctx.project, branch: ctx.branch, matched: ctx.root });
+      return text({
+        project: ctx.project,
+        branch: ctx.branch,
+        matched: ctx.root,
+        branchScope: core.branchScopeEnabled(vault()),
+      });
     } catch (e) {
       return fail(e);
     }
@@ -65,14 +82,16 @@ server.registerTool(
       "Prefer calling this (and reading INDEX) before pulling full doc bodies.",
     inputSchema: {
       project: z.string(),
+      branch: BRANCH_ARG,
       type: z.string().optional().describe("design | plan | debug | code-review | prompts"),
       status: z.string().optional().describe("draft | active | done | archived"),
       tag: z.string().optional().describe("Filter to docs carrying this tag."),
     },
   },
-  async ({ project, type, status, tag }) => {
+  async ({ project, branch, type, status, tag }) => {
     try {
-      const docs = core.filterDocs(core.listDocs(vault(), project, type), { status, tag });
+      const scope = core.scopedProject(vault(), project, branch);
+      const docs = core.filterDocs(core.listDocs(vault(), scope, type), { status, tag });
       return text(
         docs.map((d) => ({ type: d.type, title: d.title, rel: d.rel, status: d.status, tags: d.tags, stale: d.stale }))
       );
@@ -88,11 +107,11 @@ server.registerTool(
     description:
       "Read a single document by its project-relative path (e.g. design/x.md). " +
       "Paths that escape the project scope are refused.",
-    inputSchema: { project: z.string(), path: z.string() },
+    inputSchema: { project: z.string(), branch: BRANCH_ARG, path: z.string() },
   },
-  async ({ project, path: rel }) => {
+  async ({ project, branch, path: rel }) => {
     try {
-      return text(core.readDoc(vault(), project, rel));
+      return text(core.readDoc(vault(), core.scopedProject(vault(), project, branch), rel));
     } catch (e) {
       return fail(e);
     }
@@ -107,16 +126,17 @@ server.registerTool(
       "Archived docs are excluded. Pass fuzzy=true for subsequence matching.",
     inputSchema: {
       project: z.string(),
+      branch: BRANCH_ARG,
       query: z.string(),
       type: z.string().optional(),
       fuzzy: z.boolean().optional().describe("Fuzzy (subsequence) matching."),
       across: z.boolean().optional().describe("Include granted (read-only) cross-project scopes (F15)."),
     },
   },
-  async ({ project, query, type, fuzzy, across }) => {
+  async ({ project, branch, query, type, fuzzy, across }) => {
     try {
       if (across) {
-        const hits = core.searchAcross(vault(), project, query, { type, fuzzy });
+        const hits = core.searchAcross(vault(), project, query, { type, fuzzy, branch });
         return text(
           hits.map((h) => ({
             project: h.project,
@@ -128,7 +148,7 @@ server.registerTool(
           }))
         );
       }
-      const hits = core.searchDocs(vault(), project, query, type, {}, { fuzzy });
+      const hits = core.searchDocs(vault(), core.scopedProject(vault(), project, branch), query, type, {}, { fuzzy });
       return text(hits.map((h) => ({ rel: h.rel, title: h.title, score: h.score, snippets: h.snippets })));
     } catch (e) {
       return fail(e);
@@ -143,25 +163,37 @@ server.registerTool(
       "Write a document into <project>/<type>/<name>.md (scope-checked). Smart by " +
       "default (F20): in mode 'new' it will NOT silently overwrite or duplicate — if " +
       "the name exists or a near-duplicate is found, it returns a suggestion instead " +
-      "of writing. Use mode=append (timestamped section), merge (preview), or replace " +
-      "(explicit overwrite). scaffold=true prefills the type template (F06).",
+      "of writing. New docs are date-stamped automatically: a YYYY-MM-DD-HHmm- prefix " +
+      "is prepended to `name` (idempotent — skipped when you already lead with an ISO " +
+      "date), so pass a plain slug like 'auth-redesign' and let docky add the date. " +
+      "append/replace/merge target an existing doc by its exact (already-dated) name " +
+      "and do not re-stamp it. Use mode=append (timestamped section), merge (preview), " +
+      "or replace (explicit overwrite). scaffold=true prefills the type template (F06).",
     inputSchema: {
       project: z.string(),
+      branch: BRANCH_ARG,
       type: z.string(),
-      name: z.string(),
+      name: z
+        .string()
+        .describe(
+          "Doc slug without extension. For new docs pass a plain slug (e.g. " +
+            "'auth-redesign') — docky prepends a YYYY-MM-DD-HHmm date stamp. For " +
+            "append/replace/merge pass the existing doc's exact (dated) name."
+        ),
       content: z.string().optional(),
       scaffold: z.boolean().optional().describe("Prefill from the type's template skeleton (F06)."),
       mode: z.enum(["new", "append", "merge", "replace"]).optional().describe("Write mode (F20; default new)."),
     },
   },
-  async ({ project, type, name, content, scaffold, mode }) => {
+  async ({ project, branch, type, name, content, scaffold, mode }) => {
     try {
       let body = content ?? "";
       if (scaffold) {
         const skeleton = core.renderScaffold(vault(), type, name.replace(/\.md$/i, ""));
         body = body ? `${skeleton}\n\n${body}` : skeleton;
       }
-      return text(core.smartWrite(vault(), project, type, name, body, mode ?? "new"));
+      const scope = core.scopedProject(vault(), project, branch);
+      return text(core.smartWrite(vault(), scope, type, name, body, mode ?? "new"));
     } catch (e) {
       return fail(e);
     }
@@ -179,6 +211,7 @@ server.registerTool(
       "multiple list_docs + read_doc round-trips when gathering context.",
     inputSchema: {
       project: z.string(),
+      branch: BRANCH_ARG,
       query: z.string().optional().describe("Focus the bundle on a topic; omit for a project overview."),
       budget: z.number().optional().describe("Approximate token budget; the bundle is truncated to fit."),
       across: z
@@ -187,9 +220,9 @@ server.registerTool(
         .describe("Also include granted (read-only) cross-project scopes, tagged by source (F15)."),
     },
   },
-  async ({ project, query, budget, across }) => {
+  async ({ project, branch, query, budget, across }) => {
     try {
-      return text(core.buildContext(vault(), project, { query, budget, across }));
+      return text(core.buildContext(vault(), project, { query, budget, across, branch }));
     } catch (e) {
       return fail(e);
     }

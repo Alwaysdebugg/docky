@@ -31,6 +31,7 @@ export function defaultConfig(): Config {
     autocommit: "auto",
     grants: {},
     render: { theme: "dark" },
+    branchScope: false,
   };
 }
 
@@ -50,6 +51,7 @@ export function loadConfig(vault: string): Config {
       width: typeof data.render?.width === "number" ? data.render.width : undefined,
       theme: data.render?.theme === "none" ? "none" : "dark",
     },
+    branchScope: data.branchScope === true,
   };
 }
 
@@ -115,6 +117,16 @@ export const CONFIG_KEYS: ConfigKeyDef[] = [
       const n = Number(v);
       if (!Number.isInteger(n) || n < 0) throw new DockyError("width 须为非负整数");
       c.render.width = n === 0 ? undefined : n;
+    },
+  },
+  {
+    key: "branchScope",
+    desc: "F56 按分支隔离: true|false(改后跑 docky migrate-branch-scope)",
+    default: "false",
+    get: (c) => String(c.branchScope),
+    set: (c, v) => {
+      if (v !== "true" && v !== "false") throw new DockyError("branchScope 须为 true|false");
+      c.branchScope = v === "true";
     },
   },
 ];

@@ -25,6 +25,10 @@ export interface Config {
   grants: Record<string, string[]>;
   /** Reading-view render preferences (F16; managed by F18 later). */
   render: { width?: number; theme: "dark" | "none" };
+  /** Strong branch isolation (F56): when true, docs live at
+   *  projects/<name>/<branch>/<type>/ so an agent on branch A never reads
+   *  branch B's docs. Default false (legacy projects/<name>/<type>/ layout). */
+  branchScope: boolean;
 }
 
 export interface ProjectContext {

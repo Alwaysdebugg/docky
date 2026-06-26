@@ -290,6 +290,111 @@ export function ensureProjectDirs(vault: string, project: string): void {
 }
 
 // --------------------------------------------------------------------------- //
+// Branch-scoped isolation (F56) — opt-in via cfg.branchScope. When enabled, a
+// project's docs live at projects/<name>/<branch>/<type>/ so an agent on branch
+// A never reads branch B's docs. The whole mechanism is just the scope KEY:
+// scopedProject() returns "<name>/<branch>" (else the bare name), and every
+// filesystem op already keys off `project` via projectDir/safePath — so passing
+// the scoped key isolates reads/writes/trash/state/history with no other change.
+// --------------------------------------------------------------------------- //
+/** Branch bucket used when no branch is known (detached HEAD / non-git dir). */
+export const DEFAULT_BRANCH_BUCKET = "_default";
+
+/** True when this vault stores docs per-branch (F56). */
+export function branchScopeEnabled(vault: string): boolean {
+  return loadConfig(vault).branchScope === true;
+}
+
+/** Reduce a branch name to one safe path segment (slashes & odd chars → '-').
+ *  A segment that would collide with a doc-type dir (e.g. a branch literally
+ *  named "design") or the no-branch bucket is suffixed "-branch", so branch
+ *  buckets and type dirs never share a name at the projects/<name>/ level. */
+export function branchSegment(branch: string | null | undefined): string {
+  const seg = (branch ?? "")
+    .trim()
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^[-.]+|[-.]+$/g, "");
+  if (!seg) return DEFAULT_BRANCH_BUCKET;
+  const reserved = new Set<string>([...DOC_TYPES, DEFAULT_BRANCH_BUCKET]);
+  return reserved.has(seg) ? `${seg}-branch` : seg;
+}
+
+/**
+ * The filesystem scope key for a project. When branchScope is enabled, returns
+ * "<project>/<branchSeg>"; otherwise the bare project (legacy layout). Pass the
+ * result wherever a function takes `project` to scope it to the branch — when
+ * the flag is off this is the identity, so callers are safe to use it always.
+ */
+export function scopedProject(vault: string, project: string, branch?: string | null): string {
+  return branchScopeEnabled(vault) ? `${project}/${branchSegment(branch)}` : project;
+}
+
+/** A bare-level entry that holds type subdirs is a branch bucket, not a legacy
+ *  type dir — used so migrate never re-buckets an already-migrated branch. */
+function looksLikeBranchBucket(dir: string): boolean {
+  return DOC_TYPES.some((t) => {
+    const p = path.join(dir, t);
+    return fs.existsSync(p) && fs.statSync(p).isDirectory();
+  });
+}
+
+export interface MigrateResult {
+  scope: string; // "<project>/<branchSeg>"
+  bucket: string; // branch segment docs were moved into
+  moved: string[]; // bare-level entries relocated into the bucket
+}
+
+/**
+ * Move a project's legacy docs (stored directly under projects/<name>/) into a
+ * branch bucket projects/<name>/<branchSeg>/ (F56). Run once after enabling
+ * branchScope. Idempotent: skips entries already in the bucket and never moves
+ * an existing branch bucket (even one whose name collides with a doc type).
+ */
+export function migrateBranchScope(
+  vault: string,
+  project: string,
+  branch: string | null
+): MigrateResult {
+  const seg = branchSegment(branch);
+  const base = projectDir(vault, project);
+  if (!fs.existsSync(base) || !fs.statSync(base).isDirectory()) {
+    throw new DockyError(`项目目录不存在: ${project}`);
+  }
+  const isMigratable = (entry: string): boolean => {
+    if (entry === seg) return false; // never move the bucket into itself
+    const full = path.join(base, entry);
+    if ((DOC_TYPES as readonly string[]).includes(entry)) {
+      // a legacy type dir holds docs; a branch bucket holds type subdirs. Only
+      // relocate type dirs that actually have content (empty ones are tidied below).
+      return fs.statSync(full).isDirectory() && !looksLikeBranchBucket(full) && fs.readdirSync(full).length > 0;
+    }
+    return entry === ".trash" || entry === "INDEX.md" || entry.startsWith(".docky-");
+  };
+  const candidates = fs.readdirSync(base).filter(isMigratable);
+  const moved: string[] = [];
+  const dest = path.join(base, seg);
+  if (candidates.length > 0) fs.mkdirSync(dest, { recursive: true });
+  for (const entry of candidates) {
+    const to = path.join(dest, entry);
+    if (fs.existsSync(to)) continue; // already migrated → leave it
+    fs.renameSync(path.join(base, entry), to);
+    moved.push(entry);
+  }
+  // Tidy: drop now-empty legacy type dirs left at the bare level (e.g. the
+  // scaffolding ensureProjectDirs pre-creates) so projects/<name>/ holds buckets only.
+  for (const t of DOC_TYPES) {
+    const p = path.join(base, t);
+    try {
+      if (fs.existsSync(p) && fs.statSync(p).isDirectory() && fs.readdirSync(p).length === 0) fs.rmdirSync(p);
+    } catch {
+      /* best-effort cleanup */
+    }
+  }
+  if (moved.length) autoCommitVault(vault, `migrate branch-scope: ${project} → ${seg} (${moved.length})`);
+  return { scope: `${project}/${seg}`, bucket: seg, moved };
+}
+
+// --------------------------------------------------------------------------- //
 // Frontmatter
 // --------------------------------------------------------------------------- //
 export function parseFrontmatter(text: string): Record<string, unknown> {
@@ -985,7 +1090,7 @@ export function searchAcross(
   vault: string,
   project: string,
   query: string,
-  opts: { type?: string; fuzzy?: boolean } = {}
+  opts: { type?: string; fuzzy?: boolean; branch?: string | null } = {}
 ): AcrossHit[] {
   const out: AcrossHit[] = [];
   for (const sc of resolveScopes(vault, project)) {
@@ -993,7 +1098,9 @@ export function searchAcross(
     if (sc.type && opts.type && sc.type !== opts.type) continue; // grant narrower than request
     let hits: SearchHit[];
     try {
-      hits = searchDocs(vault, sc.project, query, type, {}, { fuzzy: opts.fuzzy });
+      // Each scope is searched in its own branch bucket (F56); cross-project
+      // grants assume the same branch name (missing → no hits, gracefully).
+      hits = searchDocs(vault, scopedProject(vault, sc.project, opts.branch), query, type, {}, { fuzzy: opts.fuzzy });
     } catch {
       continue;
     }
@@ -1094,11 +1201,35 @@ export type WriteOutcome =
   | { status: "duplicate_suspected"; candidate: SimilarDoc; suggestion: string; hint: string }
   | { status: "merge_preview"; rel: string; preview: string; hint: string };
 
+/** YYYY-MM-DD-HHmm timestamp (UTC, consistent with today() and append stamps). */
+function dateTimeStamp(): string {
+  const iso = new Date().toISOString(); // 2026-06-23T14:30:45.123Z
+  return `${iso.slice(0, 10)}-${iso.slice(11, 13)}${iso.slice(14, 16)}`; // 2026-06-23-1430
+}
+
+/** Leading ISO-date prefix (date, optionally with -HHmm), used to detect an
+ *  already-dated doc name so date-stamping stays idempotent. */
+const DATE_PREFIX_RE = /^\d{4}-\d{2}-\d{2}(-\d{4})?-/;
+
+/**
+ * Prepend a YYYY-MM-DD-HHmm stamp to an agent-generated doc name so the vault
+ * stays chronologically sortable. Idempotent: a name that already leads with an
+ * ISO date is returned unchanged. Operates on the bare name (.md is handled by
+ * writeDoc downstream).
+ */
+export function datePrefixed(name: string): string {
+  return DATE_PREFIX_RE.test(name) ? name : `${dateTimeStamp()}-${name}`;
+}
+
 /**
  * Agent-safe write (F20): in the default "new" mode, refuses to silently
  * overwrite/duplicate — if the target name exists or a near-duplicate is found,
  * returns a structured suggestion instead of writing. append/merge/replace are
  * explicit. Human-side add/write are unaffected (handled by F10).
+ *
+ * Every brand-new doc an agent generates is date-stamped (datePrefixed): the
+ * created file name leads with a YYYY-MM-DD-HHmm prefix. Operations that target
+ * an existing doc by name (append/replace/merge onto a match) keep its name.
  */
 export function smartWrite(
   vault: string,
@@ -1115,26 +1246,32 @@ export function smartWrite(
   // Agent writes are stamped for the F22 review inbox.
   const stamped = stampFrontmatter(content, { source: "agent", review: "pending" });
 
+  // Create a fresh, date-stamped file — used by every path that generates a new
+  // doc rather than targeting an existing one by name.
+  const createNew = (): WriteOutcome => {
+    const dest = writeDoc(vault, project, docType, datePrefixed(name), stamped);
+    return { status: "written", rel: `${docType}/${path.basename(dest)}` };
+  };
+
   if (mode === "append") {
     if (exists) {
       appendDoc(vault, project, rel, content);
       setReview(vault, project, rel, "pending"); // new agent content re-enters review
       return { status: "appended", rel };
     }
-    writeDoc(vault, project, docType, name, stamped);
-    return { status: "written", rel };
+    return createNew();
   }
   if (mode === "replace") {
-    if (exists) backupOverwrite(vault, project, rel); // back up old content first → undo-able (F10 consistency)
-    writeDoc(vault, project, docType, name, stamped);
-    return { status: "written", rel };
+    if (exists) {
+      backupOverwrite(vault, project, rel); // back up old content first → undo-able (F10 consistency)
+      writeDoc(vault, project, docType, name, stamped); // overwrite keeps the existing name
+      return { status: "written", rel };
+    }
+    return createNew();
   }
   if (mode === "merge") {
     const target = exists ? rel : findSimilar(vault, project, { name: fileName, content })[0]?.rel;
-    if (!target) {
-      writeDoc(vault, project, docType, name, stamped);
-      return { status: "written", rel };
-    }
+    if (!target) return createNew();
     return {
       status: "merge_preview",
       rel: target,
@@ -1156,8 +1293,7 @@ export function smartWrite(
       hint: "再次调用并指定 mode=append|merge|replace 以继续",
     };
   }
-  writeDoc(vault, project, docType, name, stamped);
-  return { status: "written", rel };
+  return createNew();
 }
 
 // --------------------------------------------------------------------------- //
@@ -1384,22 +1520,23 @@ function firstParagraph(body: string): string {
 export function buildContext(
   vault: string,
   project: string,
-  opts: { query?: string; budget?: number; across?: boolean } = {}
+  opts: { query?: string; budget?: number; across?: boolean; branch?: string | null } = {}
 ): ContextBundle {
   const query = (opts.query ?? "").trim();
-  const all = listDocs(vault, project);
+  const scope = scopedProject(vault, project, opts.branch); // F56: branch bucket (else bare)
+  const all = listDocs(vault, scope);
   const archivedCount = all.filter((d) => d.status === "archived").length;
   const docs = filterDocs(all); // hide archived
 
-  const pins = new Set(getPins(vault, project));
-  const recents = getRecents(vault, project);
+  const pins = new Set(getPins(vault, scope));
+  const recents = getRecents(vault, scope);
   const recentRank = new Map<string, number>();
   recents.forEach((rel, i) => recentRank.set(rel, recents.length - i));
 
   const terms = query ? query.toLowerCase().split(/\s+/).filter(Boolean) : [];
   const snippetByRel = new Map<string, string>();
   if (query) {
-    for (const h of searchDocs(vault, project, query)) {
+    for (const h of searchDocs(vault, scope, query)) {
       if (!snippetByRel.has(h.rel)) snippetByRel.set(h.rel, h.snippet);
     }
   }
@@ -1495,7 +1632,7 @@ export function buildContext(
   if (opts.across && query) {
     let crossCount = 0;
     for (const sc of resolveScopes(vault, project).filter((s) => s.readonly)) {
-      for (const h of searchDocs(vault, sc.project, query, sc.type, {}, {}).slice(0, 3)) {
+      for (const h of searchDocs(vault, scopedProject(vault, sc.project, opts.branch), query, sc.type, {}, {}).slice(0, 3)) {
         const slash = h.rel.indexOf("/");
         items.push({
           rel: h.rel,

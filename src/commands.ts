@@ -150,6 +150,12 @@ export function executeCommand(vault: string, project: string | null, raw: strin
   cmd = ALIASES[cmd] ?? cmd;
   const args = parts.slice(1);
 
+  // Branch isolation (F56): filesystem commands scope to the cwd's branch via
+  // scopeOf(); config/cross-project commands (grant/revoke/link/unlink) keep the
+  // bare name. When branchScope is off, scopeOf is the identity (bare name).
+  const branch = core.gitBranch(process.cwd());
+  const scopeOf = (p: string | null): string => core.scopedProject(vault, needProject(p), branch);
+
   const out: OutLine[] = [echo];
   try {
     switch (cmd) {
@@ -161,7 +167,7 @@ export function executeCommand(vault: string, project: string | null, raw: strin
         return { output: out };
       }
       case "inbox": {
-        const proj = needProject(project);
+        const proj = scopeOf(project);
         const pending = core.listPending(vault, proj);
         if (pending.length === 0) {
           out.push(line("收件箱为空(无待审文档)", "info"));
@@ -172,7 +178,7 @@ export function executeCommand(vault: string, project: string | null, raw: strin
         return { output: out };
       }
       case "dashboard": {
-        const proj = needProject(project);
+        const proj = scopeOf(project);
         const s = computeStats(vault, proj);
         out.push(line(`${proj} · 概览  (共 ${s.total} 篇)`, "info"));
         out.push(line(`  ${"类型".padEnd(10)} active done archived 陈旧⚠`));
@@ -188,7 +194,7 @@ export function executeCommand(vault: string, project: string | null, raw: strin
         return { output: out };
       }
       case "doctor": {
-        const proj = needProject(project);
+        const proj = scopeOf(project);
         const issues = lintProject(vault, proj);
         if (issues.length === 0) {
           out.push(line("✓ 文档库健康,无问题", "ok"));
@@ -259,7 +265,7 @@ export function executeCommand(vault: string, project: string | null, raw: strin
         }
       }
       case "list": {
-        const proj = needProject(project);
+        const proj = scopeOf(project);
         const f = parseListArgs(args);
         const docs = core.filterDocs(core.listDocs(vault, proj, f.type), {
           status: f.status,
@@ -273,7 +279,7 @@ export function executeCommand(vault: string, project: string | null, raw: strin
         return { output: out };
       }
       case "search": {
-        const proj = needProject(project);
+        const proj = scopeOf(project);
         const query = args.join(" ");
         if (!query) throw new DockyError("用法: /search <关键词>");
         const hits = core.searchDocs(vault, proj, query, undefined);
@@ -286,7 +292,7 @@ export function executeCommand(vault: string, project: string | null, raw: strin
         return { output: out };
       }
       case "open": {
-        const proj = needProject(project);
+        const proj = scopeOf(project);
         if (!args[0]) throw new DockyError("用法: /open <相对路径>");
         const content = core.readDoc(vault, proj, args[0]);
         core.recordOpen(vault, proj, args[0]);
@@ -294,7 +300,7 @@ export function executeCommand(vault: string, project: string | null, raw: strin
         return { output: out };
       }
       case "links": {
-        const proj = needProject(project);
+        const proj = scopeOf(project);
         if (!args[0]) throw new DockyError("用法: /links <相对路径>");
         const links = core.getLinks(vault, proj, args[0]);
         const outs = links.outlinks.filter((o) => o.rel).map((o) => o.rel);
@@ -304,7 +310,7 @@ export function executeCommand(vault: string, project: string | null, raw: strin
         return { output: out };
       }
       case "save": {
-        const proj = needProject(project);
+        const proj = scopeOf(project);
         if (args.length < 2) throw new DockyError("用法: /save <名称> <查询>");
         const q = args.slice(1).join(" ");
         saveFolder(vault, proj, args[0], q);
@@ -312,7 +318,7 @@ export function executeCommand(vault: string, project: string | null, raw: strin
         return { output: out };
       }
       case "folders": {
-        const proj = needProject(project);
+        const proj = scopeOf(project);
         const folders = listFolders(vault, proj);
         if (folders.length === 0) out.push(line("还没有智能文件夹(/save <名称> <查询>)", "info"));
         for (const f of folders) {
@@ -321,7 +327,7 @@ export function executeCommand(vault: string, project: string | null, raw: strin
         return { output: out };
       }
       case "recent": {
-        const proj = needProject(project);
+        const proj = scopeOf(project);
         const pins = core.getPins(vault, proj);
         const recents = core.getRecents(vault, proj);
         if (pins.length === 0 && recents.length === 0) {
@@ -339,21 +345,21 @@ export function executeCommand(vault: string, project: string | null, raw: strin
         return { output: out };
       }
       case "pin": {
-        const proj = needProject(project);
+        const proj = scopeOf(project);
         if (!args[0]) throw new DockyError("用法: /pin <相对路径>");
         core.pin(vault, proj, args[0]);
         out.push(line(`已置顶 ${args[0]}`, "ok"));
         return { output: out };
       }
       case "unpin": {
-        const proj = needProject(project);
+        const proj = scopeOf(project);
         if (!args[0]) throw new DockyError("用法: /unpin <相对路径>");
         core.unpin(vault, proj, args[0]);
         out.push(line(`已取消置顶 ${args[0]}`, "ok"));
         return { output: out };
       }
       case "status": {
-        const proj = needProject(project);
+        const proj = scopeOf(project);
         if (args.length < 2) {
           throw new DockyError("用法: /status <相对路径> <draft|active|done|archived>");
         }
@@ -362,7 +368,7 @@ export function executeCommand(vault: string, project: string | null, raw: strin
         return { output: out };
       }
       case "new": {
-        const proj = needProject(project);
+        const proj = scopeOf(project);
         if (!args[0]) throw new DockyError("用法: /new <类型> [名]");
         const name = args.slice(1).join(" ") || undefined;
         const dest = core.scaffold(vault, proj, args[0], name);
@@ -372,11 +378,10 @@ export function executeCommand(vault: string, project: string | null, raw: strin
         return { output: out };
       }
       case "add": {
-        const proj = needProject(project);
+        const proj = scopeOf(project);
         const force = args.includes("--force");
         const a = args.filter((x) => x !== "--force");
         if (a.length < 2) throw new DockyError("用法: /add <类型> <路径> [新名] [--force]");
-        const branch = core.gitBranch(process.cwd());
         const dest = core.addDoc(vault, proj, a[0], a[1], {
           branch,
           withFrontmatter: true,
@@ -388,19 +393,19 @@ export function executeCommand(vault: string, project: string | null, raw: strin
         return { output: out };
       }
       case "index": {
-        const proj = needProject(project);
+        const proj = scopeOf(project);
         const p = core.generateIndex(vault, proj);
         out.push(line(`已刷新 ${path.basename(p)}`, "ok"));
         return { output: out };
       }
       case "export": {
-        const proj = needProject(project);
+        const proj = scopeOf(project);
         const r = exportSite(vault, proj, path.resolve(args[0] || "./docky-export"));
         out.push(line(`已导出 ${r.count} 篇静态站点 → ${r.dir}`, "ok"));
         return { output: out };
       }
       case "share": {
-        const proj = needProject(project);
+        const proj = scopeOf(project);
         if (!args[0]) throw new DockyError("用法: /share <相对路径>");
         const file = shareDoc(vault, proj, args[0]);
         out.push(line(`已导出 ${file}(自包含 HTML)`, "ok"));
@@ -413,7 +418,7 @@ export function executeCommand(vault: string, project: string | null, raw: strin
         return { output: out };
       }
       case "log": {
-        const proj = needProject(project);
+        const proj = scopeOf(project);
         if (!args[0]) throw new DockyError("用法: /log <相对路径>");
         const commits = core.logDoc(vault, proj, args[0]);
         if (commits.length === 0) out.push(line("(无提交历史)", "info"));
@@ -421,7 +426,7 @@ export function executeCommand(vault: string, project: string | null, raw: strin
         return { output: out };
       }
       case "diff": {
-        const proj = needProject(project);
+        const proj = scopeOf(project);
         if (!args[0]) throw new DockyError("用法: /diff <相对路径> [revA] [revB]");
         const diff = core.diffDoc(vault, proj, args[0], args[1], args[2]);
         if (!diff.trim()) out.push(line("(无差异)", "info"));
@@ -429,7 +434,7 @@ export function executeCommand(vault: string, project: string | null, raw: strin
         return { output: out };
       }
       case "mv": {
-        const proj = needProject(project);
+        const proj = scopeOf(project);
         const force = args.includes("--force");
         const a = args.filter((x) => x !== "--force");
         if (a.length < 2) throw new DockyError("用法: /mv <相对路径> <目标类型> [--force]");
@@ -438,41 +443,41 @@ export function executeCommand(vault: string, project: string | null, raw: strin
         return { output: out };
       }
       case "rm": {
-        const proj = needProject(project);
+        const proj = scopeOf(project);
         if (!args[0]) throw new DockyError("用法: /rm <相对路径> [--yes]");
         core.removeDoc(vault, proj, args[0]);
         out.push(line(`已移入回收站 ${args[0]}(可 /undo 或 /restore)`, "ok"));
         return { output: out };
       }
       case "undo": {
-        const proj = needProject(project);
+        const proj = scopeOf(project);
         const desc = core.undo(vault, proj);
         out.push(line(`已撤销:${desc}`, "ok"));
         return { output: out };
       }
       case "trash": {
-        const proj = needProject(project);
+        const proj = scopeOf(project);
         const entries = core.listTrash(vault, proj);
         if (entries.length === 0) out.push(line("(回收站为空)", "info"));
         for (const e of entries) out.push(line(`  ${e.name}  →  ${e.rel}`));
         return { output: out };
       }
       case "restore": {
-        const proj = needProject(project);
+        const proj = scopeOf(project);
         if (!args[0]) throw new DockyError("用法: /restore <回收站名>");
         const rel = core.restoreDoc(vault, proj, args[0]);
         out.push(line(`已还原 ${rel}`, "ok"));
         return { output: out };
       }
       case "grant": {
-        const proj = needProject(project);
+        const proj = needProject(project); // grants are project-level, not branch-scoped
         if (!args[0]) throw new DockyError("用法: /grant <项目[:类型]>");
         core.addGrant(vault, proj, args[0]);
         out.push(line(`已授权 ${proj} → ${args[0]}(只读↗)`, "ok"));
         return { output: out };
       }
       case "revoke": {
-        const proj = needProject(project);
+        const proj = needProject(project); // grants are project-level, not branch-scoped
         if (!args[0]) throw new DockyError("用法: /revoke <项目[:类型]>");
         core.revokeGrant(vault, proj, args[0]);
         out.push(line(`已撤销 ${proj} → ${args[0]}`, "ok"));
@@ -487,13 +492,13 @@ export function executeCommand(vault: string, project: string | null, raw: strin
         return { output: out };
       }
       case "link": {
-        const proj = needProject(project);
+        const proj = needProject(project); // symlink points at the whole project dir
         const link = core.linkProject(vault, proj);
         out.push(line(`已建立 symlink: ${link}`, "ok"));
         return { output: out };
       }
       case "unlink": {
-        const proj = needProject(project);
+        const proj = needProject(project); // symlink points at the whole project dir
         core.unlinkProject(vault, proj);
         out.push(line("已移除 symlink", "ok"));
         return { output: out };
