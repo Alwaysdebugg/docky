@@ -1,166 +1,168 @@
-# docky (TypeScript)
+<div align="center">
 
-集中管理 AI agent 辅助开发时产生的各类 Markdown 文档,按 `项目 / 类型` 分类,与各业务项目的 git 解耦,并对 agent 强制**按项目作用域隔离**读取。
-
-TypeScript 实现:`commander`(CLI)+ 官方 `@modelcontextprotocol/sdk`(MCP)+ `Ink`(TUI)。
-
-## 安装
-
-本地开发(editable 风格,改代码即生效):
-
-```bash
-cd docky-ts
-npm install            # 安装依赖并自动 build
-npm link               # 把 docky / docky-mcp 挂到全局
+```
+██████╗  ██████╗  ██████╗██╗  ██╗██╗   ██╗
+██╔══██╗██╔═══██╗██╔════╝██║ ██╔╝╚██╗ ██╔╝
+██║  ██║██║   ██║██║     █████╔╝  ╚████╔╝
+██║  ██║██║   ██║██║     ██╔═██╗   ╚██╔╝
+██████╔╝╚██████╔╝╚██████╗██║  ██╗   ██║
+╚═════╝  ╚═════╝  ╚═════╝╚═╝  ╚═╝   ╚═╝
 ```
 
-或构建后全局安装:
+**A centralized home for the Markdown your AI agents generate — organized by project & type, decoupled from each repo's git, and served to agents with hard per-project scope isolation.**
+
+![tests](https://img.shields.io/badge/tests-151%20passing-brightgreen)
+![node](https://img.shields.io/badge/node-%E2%89%A518-339933?logo=node.js&logoColor=white)
+![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178c6?logo=typescript&logoColor=white)
+![MCP](https://img.shields.io/badge/MCP-server-7c3aed)
+![license](https://img.shields.io/badge/license-MIT-blue)
+
+CLI · Interactive TUI · MCP server
+
+</div>
+
+---
+
+## Why docky?
+
+When you build with AI coding agents, they produce a steady stream of process Markdown — design notes, plans, debugging logs, code-review notes, prompt drafts. Left in each repo, those docs:
+
+- **pollute git** — `git diff`/`log` get buried under non-code churn;
+- **scatter** — no single place to find or search history across projects;
+- **pollute agent context** — an agent reads unrelated docs, wasting tokens and getting misled.
+
+**docky** pulls these docs out of your repos into one **central vault** (its own git repo), filed as `projects/<name>/<type>/`. Humans browse and search from a single entry point; agents read and write through an MCP server that **confines every call to one project's scope** — so an agent can reuse a project's history without ever seeing another project's docs.
+
+## Features
+
+- **Five fixed doc types** — `design` · `plan` · `debug` · `code-review` · `prompts`. Predictable structure for humans and machines.
+- **Automatic project detection** — resolves the current project from your working directory + git repo root + branch. Never falls back to a global scope.
+- **Hard scope isolation** — every read/write is bounded to one project; any `../` path escape is refused (unit-tested).
+- **Three interfaces** — a CLI (~45 commands), an Ink **TUI** (Claude-Code-style REPL), and an **MCP server** for agents.
+- **Search that lands you somewhere** — relevance-ranked full-text search, fuzzy quick-open, recents/pins, saved smart folders, wiki-links & backlinks.
+- **Lifecycle & quality** — per-doc status (`draft/active/done/archived`), `doctor` lint, an insights `dashboard`, and a relationship `graph`.
+- **Versioned & reversible** — the vault auto-commits on writes (`log`/`diff`); deletes go to a recycle bin with `undo`/`restore`.
+- **Bulk import** — scan a repo for stray `.md` and classify it heuristically with a dry-run preview before anything moves.
+- **First-class agent integration** — MCP tools + resources + prompts, smart (non-duplicating) writes, an agent-output review `inbox`, and one-command Claude Code hooks.
+
+## Install
+
+Requires Node ≥ 18.
 
 ```bash
-npm install && npm run build
-npm install -g .
+git clone <your-fork-or-repo-url> docky
+cd docky
+npm install      # installs deps and builds (via the prepare script)
+npm link         # put `docky` and `docky-mcp` on your PATH
 ```
 
-> 用 Node 分发,无需处理 Python 的 PEP 668 / pipx 问题。也可 `npx` 直接跑。
+Or install globally from a checkout: `npm install -g .`
 
-## 概念
-
-- **中心仓库(vault)**:独立 git 仓库,默认 `~/docky-vault`,可用环境变量 `DOCKY_VAULT` 覆盖。结构 `projects/<项目>/<类型>/`。
-- **类型(固定枚举)**:`design`、`plan`、`debug`、`code-review`、`prompts`。
-- **项目自动识别**:命令在某项目目录下运行时,按"工作目录 + git 仓库根 + 当前 branch"自动推断属于哪个项目;推断失败则报错,绝不静默回退到全局。
-
-## 快速上手
+## Quick start
 
 ```bash
-docky init                       # 初始化中心仓库
-cd ~/code/my-app
-docky register my-app            # 注册当前目录为项目 my-app
-docky whoami                     # 确认当前目录解析到的项目/分支
-
-docky add design ./架构.md       # 归档(自动判定项目)
-docky add debug ./排查.md -f     # -f 自动加 frontmatter
-docky list                       # 列出当前项目全部文档
-docky list debug                 # 只看 debug
-docky search session             # 作用域内检索
-docky index                      # 刷新 INDEX.md
+docky setup                              # init vault + register this repo + install hooks + show MCP hint
+claude mcp add --scope user docky -- docky-mcp   # connect Claude Code (one-time)
 ```
 
-## CLI 命令
+That's it. Then, day to day:
 
-| 命令 | 说明 |
+```bash
+docky add design ./architecture.md       # archive a doc (project auto-detected)
+docky list                               # browse this project's docs
+docky search "session lost"              # full-text search within scope
+docky                                    # or just run `docky` for the interactive TUI
+```
+
+## The three interfaces
+
+### CLI
+
+A scriptable command for every operation — archiving, listing, searching, lifecycle, versioning, import, export, and more. Run `docky --help`, or see the [command reference](#command-reference).
+
+### TUI
+
+Run `docky` (no args) or `docky ui` for a Claude-Code-style REPL: a single command box with slash commands and a streaming output log — no panes to manage.
+
+- Type `/` to open the **command menu** (filtered as you type); `↑/↓` to select, `Tab` to complete, `Enter` to run.
+- `/list` opens a hierarchical browser (grouped by type); `↑/↓` to select, `Enter` to **preview** the rendered Markdown in your pager, `e` to open in your editor.
+- `/search`, `/o` (fuzzy quick-open), `/recent`, `/dashboard`, `/graph`, `/doctor`, `/inbox`, … — `/help` lists them all.
+
+### MCP server
+
+`docky-mcp` speaks the Model Context Protocol over stdio. Tools (all scope-isolated):
+
+| Tool | Purpose |
 |---|---|
-| `docky init [--no-git]` | 初始化中心仓库 |
-| `docky register <名> [--path P] [--link]` | 注册项目并登记本地路径 |
-| `docky add <类型> <文件...> [-p 项目] [-f] [--name N]` | 归档文档 |
-| `docky list [类型] [-p 项目]` | 列出文档 |
-| `docky open <相对路径> [-p 项目] [--raw]` | 渲染后用分页器查看文档(`--raw` 输出原始 md) |
-| `docky search <关键词> [-p 项目] [-t 类型]` | 作用域内检索 |
-| `docky index [-p 项目]` | 生成/刷新 INDEX.md |
-| `docky link / unlink [-p 项目]` | 在项目内建立/移除 symlink(并维护 .gitignore) |
-| `docky mv <相对路径> <目标类型> [--name N]` | 移动文档到另一类型 |
-| `docky rm <相对路径> [-p 项目]` | 删除文档 |
-| `docky projects` / `docky whoami` | 查看项目 / 当前作用域 |
+| `resolve_project(cwd)` | Infer the project + branch that owns a working directory |
+| `list_docs(project, type?)` | List docs within scope (read the index before pulling bodies) |
+| `read_doc(project, path)` | Read one doc; path escapes are refused |
+| `search_docs(project, query, type?)` | Keyword search within scope |
+| `write_doc(project, type, name, content, mode?)` | Write a doc; `mode` defaults to `new` and won't silently overwrite/duplicate |
+| `get_context(project, …)` | A ranked, de-staled one-shot context bundle for the project |
 
-`-p/--project` 省略时一律自动推断当前项目。
-
-## TUI(交互界面)
-
-直接运行 `docky`(不带参数)或 `docky ui` 进入交互界面。仿 Claude Code 的单输入框 REPL,**没有分栏**:命令结果从上往下流式打印,底部一个命令输入框。
-
-```
-docky
-```
-
-- 输入 `/` 弹出**全部命令菜单**(随输入实时过滤),菜单右侧说明右对齐。
-- 用 `↑/↓` 在菜单里选择,`Tab` 补全,`Enter` 执行高亮命令(需要参数的命令会先填入等你补参数)。
-- 命令开头的 `/` 可带可不带,回车执行,结果打印在上方。
-- 进入时自动按当前目录推断项目;`/use <项目>` 切换作用域。
-
-界面内命令:
-
-| 命令 | 说明 |
-|---|---|
-| `/help` | 列出全部命令 |
-| `/init [项目名] [路径]` | 把当前仓库登记为项目(默认用仓库名)并切换;`/register` 为别名 |
-| `/projects` | 进入项目选择器(↑/↓ 选择,Enter 切换到该项目,Esc/q 返回) |
-| `/use <项目>` / `/whoami` | 直接切换 / 识别当前项目 |
-| `/list [类型]` | 层级文档浏览器:左侧按类型分组列出文件,右侧**实时预览**;↑/↓ 选择,Enter 终端内全屏查看,`e` 用编辑器打开,Esc/q 返回 |
-| `/search <关键词>` | 作用域内全文检索 |
-| `/open <相对路径>` | 渲染 md 并在同终端分页器中查看(按 q 返回 docky) |
-| `/add <类型> <路径> [名]` | 归档 md |
-| `/index` | 刷新 INDEX.md |
-| `/mv <相对路径> <类型>` / `/rm <相对路径>` | 移动 / 删除 |
-| `/link` / `/unlink` | 建立 / 移除 symlink |
-| `/clear` / `/exit` | 清屏 / 退出(`/quit` 为别名) |
-
-所有命令都被限制在当前项目作用域内。
-
-`/open` 与 `docky open` 会把 Markdown 渲染成带颜色的终端文本,并用你的分页器($PAGER,默认 `less -R`)在**同一个终端**打开——无需切换到别的应用,按 `q` 即返回 docky。
-
-## MCP(给 AI agent 用)
-
-启动(stdio):
-
-```bash
-docky-mcp            # 或 node dist/mcp.js / npm run mcp
-```
-
-MCP 客户端配置:
+It also exposes docs as MCP **resources** and provides scaffold **prompts** (e.g. design/debug). Configure your client with:
 
 ```json
-{
-  "mcpServers": {
-    "docky": { "command": "docky-mcp" }
-  }
-}
+{ "mcpServers": { "docky": { "command": "docky-mcp" } } }
 ```
 
-提供的工具(全部按 `project` 作用域隔离,越界路径一律拒绝):
+## Claude Code integration (hooks)
 
-| 工具 | 用途 |
-|---|---|
-| `resolve_project(cwd)` | 由工作目录推断项目与分支 |
-| `list_docs(project, type?)` | 列出作用域内文档(建议先列再读) |
-| `read_doc(project, path)` | 读取单篇,路径越界拒绝 |
-| `search_docs(project, query, type?)` | 作用域内关键词检索 |
-| `write_doc(project, type, name, content)` | 写入文档 |
-
-## Claude Code 集成(hooks)
-
-让 agent 默认走 docky 读写过程文档,一条命令安装护栏(无需手写脚本或 jq):
+Make agents default to docky for process docs — one command, no scripts or `jq`:
 
 ```bash
-docky hooks install          # 写入 ./.claude/settings.json(项目级)
-docky hooks install --user   # 或写入 ~/.claude/settings.json(全局)
+docky hooks install          # writes ./.claude/settings.json (project-level)
+docky hooks install --user   # or ~/.claude/settings.json (global)
 ```
 
-安装两个 hook(幂等,可重复运行):
+It installs two idempotent hooks:
 
-- `SessionStart → docky hooks context`:会话开始时注入"过程文档走 docky"的政策,并列出当前项目已有文档,引导 agent 优先从中心仓库读。
-- `PreToolUse (Edit|Write) → docky hooks guard`:当 agent 想把过程类 `.md` 写进仓库时**拦截**并提示改用 `write_doc`;放行 README/CHANGELOG 等常规仓库文档,以及写入 vault 的文件。
+- **`SessionStart → docky hooks context`** — injects the "process docs live in docky" policy plus the current project's existing doc list, so the agent reads from the vault from the start.
+- **`PreToolUse (Edit|Write) → docky hooks guard`** — blocks an agent from writing a process `.md` into the repo and redirects it to `write_doc`; standard repo docs (README/CHANGELOG/…) and vault writes are allowed.
 
-`docky hooks guard` / `docky hooks context` 是 hook 调用的内置处理器(从 stdin 读 Claude Code 的事件 JSON、按 docky 逻辑输出),不依赖外部脚本。
+> Hooks can only block/allow/inject — they can't force a tool call. "Read from the vault first" is driven by the injected context + your `CLAUDE.md`; the write side is enforced by the `PreToolUse` guard.
 
-> 注:hook 只能拦截/放行/注入上下文,不能强制模型去调某个工具。"读优先走 vault" 主要靠 SessionStart 注入的上下文 + `CLAUDE.md` 引导;写这一侧由 PreToolUse 硬护栏兜底。
+## Concepts
 
-## 作用域隔离
+- **Vault** — an independent git repo (default `~/docky-vault`, override with `$DOCKY_VAULT`), laid out as `projects/<name>/<type>/`, with an auto-generated `INDEX.md` per project.
+- **Scope isolation** — the core guarantee. All file operations are confined to a single project directory; escaping paths are rejected (`safePath`).
+- **Auto-commit** — writes and deletes are committed to the vault automatically, so history is always recoverable.
+- **Safe delete** — `rm` moves docs to a recycle bin; `undo`/`restore` bring them back.
+- **Git decoupling** — docs live only in the vault; your repos stay clean. Optional `docky link` creates a symlink back into a repo and gitignores it.
 
-docky 的核心保证:所有文档操作都被限制在单一项目目录内,任何试图通过 `../` 越出项目目录的路径都会被 `safePath` 拒绝(已有单测覆盖)。agent 永远无法读到其他项目的文档。
+## Command reference
 
-## 开发
+A selection (run `docky --help` for the full list):
+
+**Setup & projects** — `setup`, `init`, `register`, `projects`, `whoami`
+**Create & archive** — `new <type>`, `add <type> <files…>`, `import [dir]`
+**Find & read** — `list [type]`, `search <query>`, `open <rel>`, `links <rel>`, `recent`, `pin`/`unpin`, `save`/`folders`/`open-folder`
+**Lifecycle & quality** — `status <rel> <state>`, `doctor`, `stats`, `graph`, `index`
+**Versioning & safety** — `sync`, `log <rel>`, `diff <rel>`, `rm`, `undo`, `trash`, `restore`, `mv`
+**Scope & sharing** — `grant`/`revoke`/`grants`, `export`, `share <rel>`, `link`/`unlink`, `config`
+**Agent** — `inbox`, `review`, `hooks install`
+**Interactive** — `ui` (or just `docky`)
+
+## Development
 
 ```bash
 npm install
 npm run build      # tsc -> dist/
-npm test           # vitest
-npm run dev -- list    # 用 tsx 直接跑源码
+npm test           # vitest (151 tests)
+npm run dev -- list    # run the CLI from source via tsx
 ```
 
-## 与业务 git 解耦
+## Roadmap
 
-文档真身只存在于中心仓库;业务项目内默认不留文件。若需在项目内就地浏览,用 `docky link` 建立软链接,docky 会自动把它写进该项目的 `.gitignore`,保持业务 git 干净。symlink 默认关闭。
+docky ships a large implemented feature set; the proposal index under [`feature/`](./feature) tracks what's next. Highlights on the roadmap:
 
-## 路线图
+- **Semantic search** (embeddings + hybrid ranking)
+- **Local web UI** (`docky serve`) for browsing/reading in a browser
+- **Ask Docky** — natural-language Q&A over the vault with citations
+- **Agent memory layer** — durable decisions/conventions with recall
+- **Team sync, multi-vault workspaces, doc↔code linking**
 
-- [x] TUI(Ink):Claude-Code 式单框 REPL + 斜杠命令菜单,裸 `docky` 启动
-- [ ] `docky import`:存量 md 批量接管(扫描/分类/移动/gitignore)
+## License
+
+MIT.

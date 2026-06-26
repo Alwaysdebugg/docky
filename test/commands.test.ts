@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import * as core from "../src/core.js";
-import { COMMANDS, executeCommand, suggest } from "../src/commands.js";
+import { COMMANDS, executeCommand, parseListArgs, suggest, suggestArgs } from "../src/commands.js";
 
 let tmp: string;
 let vault: string;
@@ -87,6 +87,108 @@ describe("executeCommand", () => {
   it("accepts commands without leading slash", () => {
     const res = executeCommand(vault, "p", "list");
     expect(res.output.length).toBeGreaterThan(0);
+  });
+});
+
+describe("parseListArgs (F03)", () => {
+  it("extracts type, --status, #tag, and --stale", () => {
+    const f = parseListArgs(["design", "--status", "active", "#登录", "--stale"]);
+    expect(f.type).toBe("design");
+    expect(f.status).toBe("active");
+    expect(f.tag).toBe("登录");
+    expect(f.stale).toBe(true);
+  });
+  it("defaults to no filters", () => {
+    expect(parseListArgs([])).toEqual({ stale: false });
+  });
+});
+
+describe("lifecycle commands (F03)", () => {
+  it("/status sets a doc's status and /list --status filters by it", () => {
+    core.writeDoc(vault, "p", "design", "a", "# A");
+    core.writeDoc(vault, "p", "plan", "b", "# B");
+    const set = executeCommand(vault, "p", "/status design/a.md done");
+    expect(set.output.some((o) => o.level === "ok")).toBe(true);
+    expect(core.listDocs(vault, "p").find((d) => d.name === "a.md")!.status).toBe("done");
+    const list = executeCommand(vault, "p", "/list --status done");
+    const text = list.output.map((o) => o.text).join("\n");
+    expect(text).toContain("a.md");
+    expect(text).not.toContain("b.md");
+  });
+
+  it("/list hides archived docs by default", () => {
+    core.writeDoc(vault, "p", "design", "kept", "# Kept");
+    core.writeDoc(vault, "p", "debug", "old", "---\nstatus: archived\n---\n# Old");
+    const text = executeCommand(vault, "p", "/list").output.map((o) => o.text).join("\n");
+    expect(text).toContain("kept.md");
+    expect(text).not.toContain("old.md");
+  });
+
+  it("/status rejects an invalid state", () => {
+    core.writeDoc(vault, "p", "design", "a", "# A");
+    const res = executeCommand(vault, "p", "/status design/a.md bogus");
+    expect(res.output.some((o) => o.level === "err")).toBe(true);
+  });
+});
+
+describe("scaffold command (F06)", () => {
+  it("/new creates a draft document that shows up under --status draft", () => {
+    const res = executeCommand(vault, "p", "/new debug 登录超时");
+    expect(res.output.some((o) => o.level === "ok")).toBe(true);
+    const list = executeCommand(vault, "p", "/list --status draft");
+    expect(list.output.map((o) => o.text).join("\n")).toContain("登录超时.md");
+  });
+
+  it("/new without a type errors", () => {
+    const res = executeCommand(vault, "p", "/new");
+    expect(res.output.some((o) => o.level === "err")).toBe(true);
+  });
+});
+
+describe("onboarding (F05)", () => {
+  it("/whoami in an unregistered dir suggests how to register", () => {
+    // process.cwd() (this repo) is not registered in the fresh temp vault.
+    const res = executeCommand(vault, null, "/whoami");
+    const text = res.output.map((o) => o.text).join("\n");
+    expect(text).toContain("未注册");
+    expect(text).toContain("docky register");
+  });
+});
+
+describe("suggestArgs (F14)", () => {
+  it("completes doc paths for /open, fuzzily", () => {
+    core.writeDoc(vault, "p", "design", "architecture", "# arch");
+    core.writeDoc(vault, "p", "debug", "login", "# login");
+    expect(suggestArgs(vault, "p", "/open arch")).toContain("design/architecture.md");
+    expect(suggestArgs(vault, "p", "/open ")).toContain("debug/login.md"); // empty frag → all
+  });
+  it("completes types for /add and statuses for /status's 2nd arg", () => {
+    core.writeDoc(vault, "p", "design", "a", "# A");
+    expect(suggestArgs(vault, "p", "/add des")).toContain("design");
+    expect(suggestArgs(vault, "p", "/status design/a.md ar")).toContain("archived");
+  });
+  it("completes project names for /use", () => {
+    core.registerProject(vault, "other", path.join(tmp, "other"));
+    expect(suggestArgs(vault, "p", "/use ot")).toContain("other");
+  });
+  it("returns [] while still on the command word (defer to suggest)", () => {
+    expect(suggestArgs(vault, "p", "/op")).toEqual([]);
+    expect(suggestArgs(vault, "p", "/search foo")).toEqual([]); // free-text command
+  });
+});
+
+describe("command history (F14)", () => {
+  it("persists, dedupes consecutive, and reloads", () => {
+    core.pushHistory(vault, "p", "/list");
+    core.pushHistory(vault, "p", "/list"); // consecutive dup → skipped
+    core.pushHistory(vault, "p", "/search session");
+    expect(core.loadHistory(vault, "p")).toEqual(["/list", "/search session"]);
+  });
+  it("caps history length", () => {
+    for (let i = 0; i < 250; i++) core.pushHistory(vault, "p", `/cmd${i}`);
+    const h = core.loadHistory(vault, "p");
+    expect(h.length).toBe(200);
+    expect(h[h.length - 1]).toBe("/cmd249");
   });
 });
 
