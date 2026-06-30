@@ -40,6 +40,14 @@ describe("guardDecision", () => {
     expect(guardDecision(mk(inside), vault)).toBeNull();
   });
 
+  it("allows the Claude Code agent memory directory (…/.claude/**/memory/**)", () => {
+    const mem = "/Users/x/.claude/projects/-Users-x-code-app/memory";
+    expect(guardDecision(mk(`${mem}/MEMORY.md`), vault)).toBeNull();
+    expect(guardDecision(mk(`${mem}/feature-doc-citations.md`), vault)).toBeNull();
+    // a 'memory' dir NOT under .claude is still guarded
+    expect(guardDecision(mk("/Users/x/code/app/memory/notes.md"), vault)).not.toBeNull();
+  });
+
   it("allows when input has no path / is unparseable", () => {
     expect(guardDecision("", vault)).toBeNull();
     expect(guardDecision("not json", vault)).toBeNull();

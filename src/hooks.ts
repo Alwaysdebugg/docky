@@ -34,6 +34,12 @@ export function guardDecision(stdinJson: string, vault: string): string | null {
   const v = path.resolve(vault);
   if (resolved === v || resolved.startsWith(v + path.sep)) return null; // allow writes into the vault
 
+  // Allow the Claude Code agent memory directory (…/.claude/**/memory/**): those
+  // are the agent's own persistent memory files, not project process docs.
+  const segs = resolved.split(path.sep);
+  const claudeIdx = segs.indexOf(".claude");
+  if (claudeIdx !== -1 && segs.slice(claudeIdx + 1).includes("memory")) return null;
+
   const reason =
     `过程文档请用 docky 管理:调用 docky 的 write_doc(project, type, name, content) ` +
     `写入中心仓库,而不是在项目里创建 ${p}。类型: design / plan / debug / code-review / prompts。`;
