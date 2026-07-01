@@ -40,12 +40,16 @@ describe("guardDecision", () => {
     expect(guardDecision(mk(inside), vault)).toBeNull();
   });
 
-  it("allows the Claude Code agent memory directory (…/.claude/**/memory/**)", () => {
+  it("allows Claude Code agent memory + skills under .claude", () => {
     const mem = "/Users/x/.claude/projects/-Users-x-code-app/memory";
     expect(guardDecision(mk(`${mem}/MEMORY.md`), vault)).toBeNull();
     expect(guardDecision(mk(`${mem}/feature-doc-citations.md`), vault)).toBeNull();
-    // a 'memory' dir NOT under .claude is still guarded
+    // skill authoring files (SKILL.md + references) under .claude/**/skills/**
+    expect(guardDecision(mk("/Users/x/.claude/skills/my-skill/SKILL.md"), vault)).toBeNull();
+    expect(guardDecision(mk("/Users/x/.claude/plugins/p/skills/foo/reference.md"), vault)).toBeNull();
+    // a 'memory'/'skills' dir NOT under .claude is still guarded
     expect(guardDecision(mk("/Users/x/code/app/memory/notes.md"), vault)).not.toBeNull();
+    expect(guardDecision(mk("/Users/x/code/app/skills/design.md"), vault)).not.toBeNull();
   });
 
   it("allows when input has no path / is unparseable", () => {

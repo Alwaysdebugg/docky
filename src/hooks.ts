@@ -34,11 +34,12 @@ export function guardDecision(stdinJson: string, vault: string): string | null {
   const v = path.resolve(vault);
   if (resolved === v || resolved.startsWith(v + path.sep)) return null; // allow writes into the vault
 
-  // Allow the Claude Code agent memory directory (…/.claude/**/memory/**): those
-  // are the agent's own persistent memory files, not project process docs.
+  // Allow Claude Code agent infrastructure under .claude — the agent's own
+  // persistent memory (…/.claude/**/memory/**) and skill authoring files
+  // (…/.claude/**/skills/**, e.g. SKILL.md + references) — not project process docs.
   const segs = resolved.split(path.sep);
   const claudeIdx = segs.indexOf(".claude");
-  if (claudeIdx !== -1 && segs.slice(claudeIdx + 1).includes("memory")) return null;
+  if (claudeIdx !== -1 && segs.slice(claudeIdx + 1).some((s) => s === "memory" || s === "skills")) return null;
 
   const reason =
     `过程文档请用 docky 管理:调用 docky 的 write_doc(project, type, name, content) ` +
