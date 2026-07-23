@@ -42,7 +42,6 @@ export interface CommandSpec {
 export const COMMANDS: CommandSpec[] = [
   { name: "help", usage: "/help", desc: "列出全部命令", args: false },
   { name: "init", usage: "/init [项目名] [路径]", desc: "把当前仓库登记为项目(默认用仓库名)并切换", args: false },
-  { name: "use", usage: "/use <项目>", desc: "切换当前项目(作用域)", args: true },
   { name: "projects", usage: "/projects", desc: "列出已注册项目", args: false },
   { name: "whoami", usage: "/whoami", desc: "显示当前目录解析到的项目/分支", args: false },
   { name: "list", usage: "/list [类型] [--status S] [#标签] [--stale]", desc: "列出文档(可按类型/状态/标签过滤)", args: false },
@@ -86,7 +85,7 @@ export const COMMANDS: CommandSpec[] = [
   { name: "exit", usage: "/exit", desc: "退出(别名 /quit)", args: false },
 ];
 
-const ALIASES: Record<string, string> = { q: "exit", quit: "exit", p: "use", "?": "help", register: "init" };
+const ALIASES: Record<string, string> = { q: "exit", quit: "exit", "?": "help", register: "init" };
 
 const TYPES_HINT = DOC_TYPES.join(" / ");
 
@@ -133,7 +132,7 @@ function line(text: string, level: Level = "out"): OutLine {
 }
 
 function needProject(project: string | null): string {
-  if (!project) throw new DockyError("当前没有选中项目,用 /use <项目> 切换。");
+  if (!project) throw new DockyError("当前没有选中项目,用 /projects 选择或 /init 注册。");
   return project;
 }
 
@@ -240,15 +239,6 @@ export function executeCommand(vault: string, project: string | null, raw: strin
         out.push(line(`已注册 ${name} → ${path.resolve(localPath)}`, "ok"));
         out.push(line(`已切换到项目 ${name}`, "ok"));
         return { output: out, project: name };
-      }
-      case "use": {
-        if (!args[0]) throw new DockyError("用法: /use <项目>");
-        const ps = listProjects(vault);
-        if (!(args[0] in ps)) {
-          throw new DockyError(`未知项目: ${args[0]}(已注册: ${Object.keys(ps).join(", ") || "无"})`);
-        }
-        out.push(line(`已切换到项目 ${args[0]}`, "ok"));
-        return { output: out, project: args[0] };
       }
       case "whoami": {
         try {

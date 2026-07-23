@@ -50,17 +50,6 @@ describe("executeCommand", () => {
     expect(res.project).toBe("aliased");
   });
 
-  it("/use switches project", () => {
-    core.registerProject(vault, "q", path.join(tmp, "q"));
-    const res = executeCommand(vault, "p", "/use q");
-    expect(res.project).toBe("q");
-  });
-
-  it("/use rejects unknown project", () => {
-    const res = executeCommand(vault, "p", "/use nope");
-    expect(res.output.some((o) => o.level === "err")).toBe(true);
-  });
-
   it("/list and /search operate in scope", () => {
     core.writeDoc(vault, "p", "debug", "login", "# login\nsession lost");
     const list = executeCommand(vault, "p", "/list");
@@ -167,9 +156,9 @@ describe("suggestArgs (F14)", () => {
     expect(suggestArgs(vault, "p", "/add des")).toContain("design");
     expect(suggestArgs(vault, "p", "/status design/a.md ar")).toContain("archived");
   });
-  it("completes project names for /use", () => {
-    core.registerProject(vault, "other", path.join(tmp, "other"));
-    expect(suggestArgs(vault, "p", "/use ot")).toContain("other");
+  it("does not suggest the removed /use command", () => {
+    expect(suggest("/use")).toEqual([]);
+    expect(suggestArgs(vault, "p", "/use ot")).toEqual([]);
   });
   it("returns [] while still on the command word (defer to suggest)", () => {
     expect(suggestArgs(vault, "p", "/op")).toEqual([]);

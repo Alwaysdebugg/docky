@@ -269,7 +269,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
    *  the fresh draft in the external editor (F06). */
   function newDoc(args: string[]): void {
     if (!project) {
-      append([{ text: "› /new", level: "in" }, { text: "当前没有选中项目,用 /use 切换。", level: "err" }]);
+      append([{ text: "› /new", level: "in" }, { text: "当前没有选中项目,用 /projects 选择或 /init 注册。", level: "err" }]);
       return;
     }
     if (!args[0]) {
@@ -292,7 +292,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
   /** Soft-delete a doc into the trash (F10). */
   function doRm(rel: string): void {
     if (!project) {
-      append([{ text: "› /rm " + rel, level: "in" }, { text: "当前没有选中项目,用 /use 切换。", level: "err" }]);
+      append([{ text: "› /rm " + rel, level: "in" }, { text: "当前没有选中项目,用 /projects 选择或 /init 注册。", level: "err" }]);
       return;
     }
     try {
@@ -307,7 +307,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
   /** /diff <rel> [revA] [revB]: render a colorized diff in the pager (F08). */
   function showDiff(args: string[]): void {
     if (!project) {
-      append([{ text: "› /diff", level: "in" }, { text: "当前没有选中项目,用 /use 切换。", level: "err" }]);
+      append([{ text: "› /diff", level: "in" }, { text: "当前没有选中项目,用 /projects 选择或 /init 注册。", level: "err" }]);
       return;
     }
     if (!args[0]) {
@@ -335,7 +335,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
   /** /open <rel> in REPL mode. */
   function openInPager(rel: string): void {
     if (!project) {
-      append([{ text: "› /open " + rel, level: "in" }, { text: "当前没有选中项目,用 /use 切换。", level: "err" }]);
+      append([{ text: "› /open " + rel, level: "in" }, { text: "当前没有选中项目,用 /projects 选择或 /init 注册。", level: "err" }]);
       return;
     }
     openDoc(scoped(project), rel);
@@ -346,7 +346,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
   function enterBrowse(args: string[] = []): void {
     const echo = "› /list " + args.join(" ");
     if (!project) {
-      append([{ text: echo, level: "in" }, { text: "当前没有选中项目,用 /use 切换。", level: "err" }]);
+      append([{ text: echo, level: "in" }, { text: "当前没有选中项目,用 /projects 选择或 /init 注册。", level: "err" }]);
       return;
     }
     const f = parseListArgs(args);
@@ -384,7 +384,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
   /** Show the project relationship graph; Enter opens the selected node (F23). */
   function enterGraph(): void {
     if (!project) {
-      append([{ text: "› /graph", level: "in" }, { text: "当前没有选中项目,用 /use 切换。", level: "err" }]);
+      append([{ text: "› /graph", level: "in" }, { text: "当前没有选中项目,用 /projects 选择或 /init 注册。", level: "err" }]);
       return;
     }
     const lines = graphLines(buildGraph(vault, scoped(project)));
@@ -396,7 +396,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
   /** Open the agent-output review inbox (F22). */
   function enterInbox(): void {
     if (!project) {
-      append([{ text: "› /inbox", level: "in" }, { text: "当前没有选中项目,用 /use 切换。", level: "err" }]);
+      append([{ text: "› /inbox", level: "in" }, { text: "当前没有选中项目,用 /projects 选择或 /init 注册。", level: "err" }]);
       return;
     }
     const pending = core.listPending(vault, scoped(project));
@@ -466,7 +466,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
   /** Run the doc-doctor and show issues; Enter jumps to the doc (F19). */
   function enterDoctor(): void {
     if (!project) {
-      append([{ text: "› /doctor", level: "in" }, { text: "当前没有选中项目,用 /use 切换。", level: "err" }]);
+      append([{ text: "› /doctor", level: "in" }, { text: "当前没有选中项目,用 /projects 选择或 /init 注册。", level: "err" }]);
       return;
     }
     const issues = lintProject(vault, scoped(project));
@@ -504,7 +504,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
   /** Enter a selectable list of a doc's outlinks + backlinks for jumping (F12). */
   function enterLinks(rel: string): void {
     if (!project) {
-      append([{ text: "› /links", level: "in" }, { text: "当前没有选中项目,用 /use 切换。", level: "err" }]);
+      append([{ text: "› /links", level: "in" }, { text: "当前没有选中项目,用 /projects 选择或 /init 注册。", level: "err" }]);
       return;
     }
     let links;
@@ -608,7 +608,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
     const query = rest.join(" ").trim();
     const echo = "› /search " + args.join(" ");
     if (!project) {
-      append([{ text: echo, level: "in" }, { text: "当前没有选中项目,用 /use 切换。", level: "err" }]);
+      append([{ text: echo, level: "in" }, { text: "当前没有选中项目,用 /projects 选择或 /init 注册。", level: "err" }]);
       return;
     }
     if (!query) {
@@ -640,7 +640,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
   /** Enter the fuzzy quick-open palette (F02). */
   function enterQuickOpen(initial = ""): void {
     if (!project) {
-      append([{ text: "› /o", level: "in" }, { text: "当前没有选中项目,用 /use 切换。", level: "err" }]);
+      append([{ text: "› /o", level: "in" }, { text: "当前没有选中项目,用 /projects 选择或 /init 注册。", level: "err" }]);
       return;
     }
     let docs: DocInfo[];
@@ -671,7 +671,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
   /** Open a saved smart folder, evaluated live, as a selectable list (F24). */
   function enterFolder(name: string): void {
     if (!project) {
-      append([{ text: "› /f", level: "in" }, { text: "当前没有选中项目,用 /use 切换。", level: "err" }]);
+      append([{ text: "› /f", level: "in" }, { text: "当前没有选中项目,用 /projects 选择或 /init 注册。", level: "err" }]);
       return;
     }
     const query = getFolder(vault, scoped(project), name);
@@ -694,7 +694,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
   /** Enter a selectable list of pinned + recently-opened docs (F04). */
   function enterRecent(): void {
     if (!project) {
-      append([{ text: "› /recent", level: "in" }, { text: "当前没有选中项目,用 /use 切换。", level: "err" }]);
+      append([{ text: "› /recent", level: "in" }, { text: "当前没有选中项目,用 /projects 选择或 /init 注册。", level: "err" }]);
       return;
     }
     const byRel = new Map(core.listDocs(vault, scoped(project)).map((d) => [d.rel, d]));
@@ -722,7 +722,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
    *  directory and `#tag` tokens applied to imported docs. */
   function enterImport(args: string[]): void {
     if (!project) {
-      append([{ text: "› /import", level: "in" }, { text: "当前没有选中项目,用 /use 切换。", level: "err" }]);
+      append([{ text: "› /import", level: "in" }, { text: "当前没有选中项目,用 /projects 选择或 /init 注册。", level: "err" }]);
       return;
     }
     const tags = args.filter((a) => a.startsWith("#") && a.length > 1).map((a) => a.slice(1));
@@ -894,7 +894,7 @@ export function App({ vault, initialProject, initialImport }: AppProps) {
     }
     if (c.toLowerCase() === "outline" && a[0]) {
       if (project) enterOutline(scoped(project), a[0]);
-      else append([{ text: "› /outline", level: "in" }, { text: "当前没有选中项目,用 /use 切换。", level: "err" }]);
+      else append([{ text: "› /outline", level: "in" }, { text: "当前没有选中项目,用 /projects 选择或 /init 注册。", level: "err" }]);
       setValue("");
       return;
     }
