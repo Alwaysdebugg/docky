@@ -388,8 +388,6 @@ interface DocMeta {
   title: string;
   status: DocStatus;
   tags: string[];
-  source?: string;
-  review?: string;
 }
 
 /** Coerce a frontmatter `status` value to a known lifecycle state. */
@@ -436,8 +434,6 @@ function readDocMeta(filePath: string): DocMeta {
     title,
     status: normalizeStatus(fm.status),
     tags: normalizeTags(fm.tags),
-    source: fm.source ? String(fm.source) : undefined,
-    review: fm.review ? String(fm.review) : undefined,
   };
 }
 
@@ -471,8 +467,6 @@ export function listDocs(vault: string, project: string, docType?: string): DocI
         status: meta.status,
         tags: meta.tags,
         mtime,
-        source: meta.source,
-        review: meta.review,
       });
     }
   }
@@ -520,27 +514,6 @@ export function setStatus(
   const data = { ...(parsed.data as Record<string, unknown>), status: s };
   fs.writeFileSync(p, matter.stringify(parsed.content, data), "utf-8");
   if (!opts.noCommit) autoCommitVault(vault, `status(${rel}): ${s}`);
-  return p;
-}
-
-/** Merge tags into a document's frontmatter (deduped), preserving the body. */
-export function addTags(
-  vault: string,
-  project: string,
-  rel: string,
-  tags: string[],
-  opts: { noCommit?: boolean } = {}
-): string {
-  const p = safePath(vault, project, rel);
-  if (!fs.existsSync(p) || !fs.statSync(p).isFile()) {
-    throw new DockyError(`Document not found: ${rel}`);
-  }
-  const parsed = matter(fs.readFileSync(p, "utf-8"));
-  const merged = normalizeTags((parsed.data as Record<string, unknown>).tags);
-  for (const t of normalizeTags(tags)) if (!merged.includes(t)) merged.push(t);
-  const data = { ...(parsed.data as Record<string, unknown>), tags: merged };
-  fs.writeFileSync(p, matter.stringify(parsed.content, data), "utf-8");
-  if (!opts.noCommit) autoCommitVault(vault, `tag(${rel}): ${merged.join(",")}`);
   return p;
 }
 
@@ -934,12 +907,6 @@ export function mergePreview(vault: string, project: string, rel: string, conten
   return `<<<<<<< 现有 ${rel}\n${existing}\n=======\n${content}\n>>>>>>> 新内容`;
 }
 
-/** Merge fields into a document's frontmatter, preserving the body (F22). */
-export function stampFrontmatter(content: string, fields: Record<string, unknown>): string {
-  const parsed = matter(content);
-  return matter.stringify(parsed.content, { ...(parsed.data as Record<string, unknown>), ...fields });
-}
-
 export type WriteMode = "new" | "append" | "merge" | "replace";
 
 export type WriteOutcome =
@@ -972,7 +939,7 @@ export function datePrefixed(name: string): string {
  * Agent-safe write (F20): in the default "new" mode, refuses to silently
  * overwrite/duplicate — if the target name exists or a near-duplicate is found,
  * returns a structured suggestion instead of writing. append/merge/replace are
- * explicit. Human-side add/write are unaffected (handled by F10).
+ * explicit. Human-side add/write are unaffected.
  *
  * Every brand-new doc an agent generates is date-stamped (datePrefixed): the
  * created file name leads with a YYYY-MM-DD-HHmm prefix. Operations that target
@@ -990,13 +957,11 @@ export function smartWrite(
   const fileName = name.endsWith(".md") ? name : `${name}.md`;
   const rel = `${docType}/${fileName}`;
   const exists = docFileExists(vault, project, rel);
-  // Agent writes carry source/review metadata in frontmatter (harmless if unused).
-  const stamped = stampFrontmatter(content, { source: "agent", review: "pending" });
 
   // Create a fresh, date-stamped file — used by every path that generates a new
   // doc rather than targeting an existing one by name.
   const createNew = (): WriteOutcome => {
-    const dest = writeDoc(vault, project, docType, datePrefixed(name), stamped);
+    const dest = writeDoc(vault, project, docType, datePrefixed(name), content);
     return { status: "written", rel: `${docType}/${path.basename(dest)}` };
   };
 
@@ -1009,7 +974,7 @@ export function smartWrite(
   }
   if (mode === "replace") {
     if (exists) {
-      writeDoc(vault, project, docType, name, stamped); // overwrite keeps the existing name (prior version in git)
+      writeDoc(vault, project, docType, name, content); // overwrite keeps the existing name (prior version in git)
       return { status: "written", rel };
     }
     return createNew();

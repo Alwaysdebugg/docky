@@ -52,8 +52,6 @@ export interface DocInfo {
   status: DocStatus; // from frontmatter; defaults to "active" (F03)
   tags: string[]; // from frontmatter; defaults to [] (F03)
   mtime: number; // file modified time (ms epoch)
-  source?: string; // "human" | "agent" — who wrote it (F22)
-  review?: string; // "pending" | "approved" — review state (F22)
 }
 
 export interface Snippet {

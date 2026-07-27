@@ -239,7 +239,7 @@ program
   .option("-p, --project <name>", "Target project (auto-inferred if omitted).")
   .option("--name <name>", "Rename on archive (single file only).")
   .option("-f, --frontmatter", "Prepend metadata frontmatter.")
-  .option("--force", "Overwrite an existing target (previous version stays in git history).")
+  .option("--force", "Overwrite an existing target (prior version kept in git history when autocommit is on).")
   .action(
     (
       type: string,
@@ -499,7 +499,7 @@ program
   .command("mv <rel> <destType>")
   .description("Move a document to another type (refuses to overwrite without --force).")
   .option("--name <name>")
-  .option("--force", "Overwrite an existing target (previous version stays in git history).")
+  .option("--force", "Overwrite an existing target (prior version kept in git history when autocommit is on).")
   .option("-p, --project <name>")
   .action((rel: string, destType: string, opts: { name?: string; project?: string; force?: boolean }) => {
     const v = vault();
@@ -511,7 +511,7 @@ program
 
 program
   .command("rm <rel>")
-  .description("Remove a document (auto-committed to the vault; recoverable from git history).")
+  .description("Remove a document (auto-committed to the vault's git history when autocommit is on).")
   .option("-p, --project <name>")
   .option("-y, --yes", "Skip the confirmation prompt.")
   .action((rel: string, opts: { project?: string; yes?: boolean }) => {
@@ -519,11 +519,11 @@ program
     requireInit(v);
     const proj = resolve(v, opts.project);
     if (!opts.yes) {
-      console.log(`\x1b[33m⚠ 将删除 ${rel}(已提交进 git,可用 git 恢复)。加 --yes 确认。\x1b[0m`);
+      console.log(`\x1b[33m⚠ 将删除 ${rel}。加 --yes 确认。\x1b[0m`);
       return;
     }
     guard(() => core.removeDoc(v, proj, rel));
-    ok(`Removed ${rel} (recover from the vault's git history)`);
+    ok(`Removed ${rel}`);
   });
 
 program

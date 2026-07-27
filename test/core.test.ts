@@ -20,12 +20,6 @@ afterEach(() => {
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-/** rel of a smartWrite outcome that actually wrote/appended (narrows the union). */
-function wroteRel(o: core.WriteOutcome): string {
-  if (o.status === "written" || o.status === "appended") return o.rel;
-  throw new Error(`expected a write, got: ${JSON.stringify(o)}`);
-}
-
 function mkRepo(p: string, branch = "main"): string {
   fs.mkdirSync(p, { recursive: true });
   execFileSync("git", ["init", "-q", "-b", branch], { cwd: p });
@@ -449,20 +443,6 @@ describe("governed cross-project access (F15)", () => {
     core.addGrant(vault, "svc-a", "platform");
     expect(() => core.readDoc(vault, "svc-a", "../platform/design/ratelimit.md")).toThrow(/escapes/);
     expect(() => core.writeDoc(vault, "svc-a", "design", "../../platform/x", "# x")).toThrow(/escapes/);
-  });
-});
-
-describe("agent write metadata (F20)", () => {
-  beforeEach(() => core.registerProject(vault, "p", path.join(tmp, "p")));
-
-  it("stamps agent writes as source:agent / review:pending; human writes are not", () => {
-    const rel = wroteRel(core.smartWrite(vault, "p", "debug", "agentdoc", "# Agent Doc\nbody"));
-    core.writeDoc(vault, "p", "design", "humandoc", "# Human Doc\nbody"); // human path
-    const agent = core.listDocs(vault, "p").find((d) => d.rel === rel)!;
-    expect(agent.name).toMatch(/^\d{4}-\d{2}-\d{2}-\d{4}-agentdoc\.md$/); // date-stamped (F20)
-    expect(agent.source).toBe("agent");
-    expect(agent.review).toBe("pending");
-    expect(core.listDocs(vault, "p").find((d) => d.name === "humandoc.md")!.review).toBeUndefined();
   });
 });
 
