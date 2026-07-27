@@ -79,7 +79,7 @@ server.registerTool(
     description:
       "List documents within a project's scope. Optionally filter by type, " +
       "lifecycle status, or tag. Archived docs are hidden unless status='archived'. " +
-      "Prefer calling this (and reading INDEX) before pulling full doc bodies.",
+      "Prefer calling this before pulling full doc bodies.",
     inputSchema: {
       project: z.string(),
       branch: BRANCH_ARG,
@@ -93,7 +93,7 @@ server.registerTool(
       const scope = core.scopedProject(vault(), project, branch);
       const docs = core.filterDocs(core.listDocs(vault(), scope, type), { status, tag });
       return text(
-        docs.map((d) => ({ type: d.type, title: d.title, rel: d.rel, status: d.status, tags: d.tags, stale: d.stale }))
+        docs.map((d) => ({ type: d.type, title: d.title, rel: d.rel, status: d.status, tags: d.tags }))
       );
     } catch (e) {
       return fail(e);

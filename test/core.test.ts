@@ -6,7 +6,6 @@ import path from "node:path";
 import * as core from "../src/core.js";
 import { parseFrontmatter } from "../src/core.js";
 import { loadConfig, saveConfig } from "../src/config.js";
-import { applyImport } from "../src/importer.js";
 
 let tmp: string;
 let vault: string;
@@ -116,100 +115,9 @@ describe("search & index & frontmatter", () => {
     expect(fm.type).toBe("plan");
     expect(fm.branch).toBe("feature/x");
   });
-
-  it("generates index", () => {
-    core.registerProject(vault, "p", path.join(tmp, "p"));
-    core.writeDoc(vault, "p", "design", "a", "# A");
-    const idx = core.generateIndex(vault, "p");
-    const content = fs.readFileSync(idx, "utf-8");
-    expect(content).toContain("## design");
-    expect(content).toContain("[A]");
-  });
 });
 
-describe("recents & pins (F04)", () => {
-  beforeEach(() => {
-    core.registerProject(vault, "p", path.join(tmp, "p"));
-    core.writeDoc(vault, "p", "design", "arch", "# Arch");
-    core.writeDoc(vault, "p", "debug", "login", "# login");
-    core.writeDoc(vault, "p", "plan", "q3", "# Q3");
-  });
-
-  it("records opens most-recent-first, de-duped", () => {
-    core.recordOpen(vault, "p", "design/arch.md");
-    core.recordOpen(vault, "p", "debug/login.md");
-    core.recordOpen(vault, "p", "design/arch.md"); // re-open bubbles to front
-    expect(core.getRecents(vault, "p")).toEqual(["design/arch.md", "debug/login.md"]);
-  });
-
-  it("caps recents at 10 and persists across reloads", () => {
-    for (let i = 0; i < 15; i++) {
-      core.writeDoc(vault, "p", "design", `d${i}`, `# d${i}`);
-      core.recordOpen(vault, "p", `design/d${i}.md`);
-    }
-    const recents = core.getRecents(vault, "p");
-    expect(recents).toHaveLength(10);
-    expect(recents[0]).toBe("design/d14.md"); // newest first
-    // a fresh read (simulating a new session) sees the same persisted state
-    expect(core.getRecents(vault, "p")).toEqual(recents);
-  });
-
-  it("pins persist and are idempotent; unpin removes", () => {
-    core.pin(vault, "p", "design/arch.md");
-    core.pin(vault, "p", "design/arch.md"); // dedupe
-    expect(core.getPins(vault, "p")).toEqual(["design/arch.md"]);
-    core.unpin(vault, "p", "design/arch.md");
-    expect(core.getPins(vault, "p")).toEqual([]);
-  });
-
-  it("rejects pinning a non-existent doc", () => {
-    expect(() => core.pin(vault, "p", "design/ghost.md")).toThrow(/not found/i);
-  });
-
-  it("normalizes equivalent rel forms to one entry", () => {
-    core.pin(vault, "p", "design/arch.md");
-    core.pin(vault, "p", "./design/arch.md");
-    expect(core.getPins(vault, "p")).toEqual(["design/arch.md"]);
-  });
-
-  it("cleans up recents/pins when a doc is removed", () => {
-    core.recordOpen(vault, "p", "debug/login.md");
-    core.pin(vault, "p", "debug/login.md");
-    core.removeDoc(vault, "p", "debug/login.md");
-    expect(core.getRecents(vault, "p")).not.toContain("debug/login.md");
-    expect(core.getPins(vault, "p")).not.toContain("debug/login.md");
-  });
-
-  it("cleans up the stale location when a doc is moved", () => {
-    core.recordOpen(vault, "p", "debug/login.md");
-    core.moveDoc(vault, "p", "debug/login.md", "design");
-    expect(core.getRecents(vault, "p")).not.toContain("debug/login.md");
-  });
-
-  it("prunes entries whose files vanished out-of-band", () => {
-    core.recordOpen(vault, "p", "plan/q3.md");
-    fs.rmSync(core.safePath(vault, "p", "plan/q3.md")); // delete behind docky's back
-    expect(core.getRecents(vault, "p")).not.toContain("plan/q3.md");
-  });
-
-  it("stores state inside project scope and refuses escaping rels", () => {
-    core.registerProject(vault, "secret", path.join(tmp, "secret"));
-    expect(() => core.pin(vault, "p", "../secret/x.md")).toThrow(/escapes/);
-    // recordOpen must never throw, even on an escaping path
-    expect(() => core.recordOpen(vault, "p", "../secret/x.md")).not.toThrow();
-    expect(core.getRecents(vault, "p")).toHaveLength(0);
-    expect(fs.existsSync(path.join(tmp, "vault", "projects", "p", ".docky-state.json")) ||
-      core.getPins(vault, "p").length === 0).toBe(true);
-  });
-
-  it("does not list the state file as a document", () => {
-    core.recordOpen(vault, "p", "design/arch.md"); // creates .docky-state.json
-    const docs = core.listDocs(vault, "p");
-    expect(docs.some((d) => d.name.includes(".docky-state"))).toBe(false);
-  });
-});
-
-describe("tags, lifecycle & stale (F03)", () => {
+describe("tags & lifecycle (F03)", () => {
   beforeEach(() => core.registerProject(vault, "p", path.join(tmp, "p")));
 
   it("parses status and tags from frontmatter, defaulting sensibly", () => {
@@ -238,24 +146,6 @@ describe("tags, lifecycle & stale (F03)", () => {
     expect(core.filterDocs(all, { tag: "#x" }).map((d) => d.name)).toEqual(["a.md"]); // leading # tolerated
   });
 
-  it("flags an active design/plan as stale once it ages past staleDays", () => {
-    core.writeDoc(vault, "p", "design", "old", "# Old");
-    core.writeDoc(vault, "p", "debug", "olddebug", "# OldDebug");
-    const past = new Date(Date.now() - 60 * 86_400_000); // 60 days ago (> default 30)
-    fs.utimesSync(core.safePath(vault, "p", "design/old.md"), past, past);
-    fs.utimesSync(core.safePath(vault, "p", "debug/olddebug.md"), past, past);
-    const docs = core.listDocs(vault, "p");
-    expect(docs.find((d) => d.name === "old.md")!.stale).toBe(true);
-    expect(docs.find((d) => d.name === "olddebug.md")!.stale).toBe(false); // debug never stale
-  });
-
-  it("a done/archived doc is never stale", () => {
-    core.writeDoc(vault, "p", "design", "finished", "---\nstatus: done\n---\n# Finished");
-    const past = new Date(Date.now() - 90 * 86_400_000);
-    fs.utimesSync(core.safePath(vault, "p", "design/finished.md"), past, past);
-    expect(core.listDocs(vault, "p").find((d) => d.name === "finished.md")!.stale).toBe(false);
-  });
-
   it("setStatus rewrites frontmatter while preserving the body", () => {
     core.writeDoc(vault, "p", "design", "s", "# S\n\nimportant body text");
     core.setStatus(vault, "p", "design/s.md", "done");
@@ -280,19 +170,6 @@ describe("tags, lifecycle & stale (F03)", () => {
     expect(hits.some((h) => h.rel === "debug/live.md")).toBe(true);
     expect(hits.some((h) => h.rel === "debug/dead.md")).toBe(false);
   });
-
-  it("index shows status badges, tags, and a ⚠ stale marker; hides archived", () => {
-    core.writeDoc(vault, "p", "design", "old", "---\ntags: [登录]\n---\n# Old design");
-    core.writeDoc(vault, "p", "plan", "shipped", "---\nstatus: done\n---\n# Shipped");
-    core.writeDoc(vault, "p", "debug", "gone", "---\nstatus: archived\n---\n# Gone");
-    const past = new Date(Date.now() - 60 * 86_400_000);
-    fs.utimesSync(core.safePath(vault, "p", "design/old.md"), past, past);
-    const idx = fs.readFileSync(core.generateIndex(vault, "p"), "utf-8");
-    expect(idx).toContain("⚠ "); // stale marker on the aged design
-    expect(idx).toContain("#登录"); // tags rendered
-    expect(idx).toContain("[done]"); // status badge
-    expect(idx).not.toContain("Gone"); // archived omitted
-  });
 });
 
 describe("vault versioning (F08)", () => {
@@ -301,23 +178,11 @@ describe("vault versioning (F08)", () => {
     core.registerProject(vault, "p", path.join(tmp, "p"));
   });
 
-  it("auto-commits on write and exposes per-doc history", () => {
+  it("auto-commits on write (nothing left uncommitted)", () => {
     core.writeDoc(vault, "p", "design", "arch", "# Arch v1");
     expect(core.uncommittedCount(vault)).toBe(0); // committed
-    const log1 = core.logDoc(vault, "p", "design/arch.md");
-    expect(log1.length).toBe(1);
-    expect(log1[0].subject).toContain("design");
     core.writeDoc(vault, "p", "design", "arch", "# Arch v2\nnew line");
-    expect(core.logDoc(vault, "p", "design/arch.md").length).toBe(2); // second commit for the edit
-  });
-
-  it("diffDoc shows changes against an earlier revision", () => {
-    core.writeDoc(vault, "p", "design", "arch", "# Arch\nalpha");
-    const first = core.logDoc(vault, "p", "design/arch.md")[0].hash;
-    core.writeDoc(vault, "p", "design", "arch", "# Arch\nbeta");
-    const diff = core.diffDoc(vault, "p", "design/arch.md", first);
-    expect(diff).toContain("alpha"); // removed line
-    expect(diff).toContain("beta"); // added line
+    expect(core.uncommittedCount(vault)).toBe(0); // the edit is committed too
   });
 
   it("does not commit when autocommit is off, but sync does", () => {
@@ -329,30 +194,11 @@ describe("vault versioning (F08)", () => {
     expect(core.uncommittedCount(vault)).toBe(0);
   });
 
-  it("commits removals and preserves history (basis for F10 undo)", () => {
+  it("commits removals (recoverable from git history)", () => {
     core.writeDoc(vault, "p", "debug", "gone", "# Gone");
     core.removeDoc(vault, "p", "debug/gone.md");
     expect(core.uncommittedCount(vault)).toBe(0); // rm committed
-    expect(core.logDoc(vault, "p", "debug/gone.md").length).toBeGreaterThanOrEqual(1);
-  });
-
-  it("folds a batch import into a single commit", () => {
-    const a = path.join(tmp, "a.md");
-    const b = path.join(tmp, "b.md");
-    fs.writeFileSync(a, "# A\n");
-    fs.writeFileSync(b, "# B\n");
-    const before = core.logDoc(vault, "p", "design/a.md").length;
-    applyImport(vault, "p", [
-      { src: a, type: "design", confidence: "high", reason: "test" },
-      { src: b, type: "design", confidence: "high", reason: "test" },
-    ]);
-    // both files landed in one commit
-    expect(core.uncommittedCount(vault)).toBe(0);
-    const logA = core.logDoc(vault, "p", "design/a.md");
-    const logB = core.logDoc(vault, "p", "design/b.md");
-    expect(logA.length).toBe(before + 1);
-    expect(logA[0].hash).toBe(logB[0].hash); // same commit
-    expect(logA[0].subject).toContain("import");
+    expect(core.listDocs(vault, "p").some((d) => d.name === "gone.md")).toBe(false);
   });
 
   it("git ops degrade to no-ops on a non-git vault", () => {
@@ -361,7 +207,6 @@ describe("vault versioning (F08)", () => {
     core.registerProject(nogit, "q", path.join(tmp, "q"));
     core.writeDoc(nogit, "q", "design", "a", "# A");
     expect(core.uncommittedCount(nogit)).toBe(0); // not a repo → 0
-    expect(core.logDoc(nogit, "q", "design/a.md")).toEqual([]);
     expect(core.commitVault(nogit, "x")).toBe(false);
   });
 });
@@ -395,13 +240,6 @@ describe("agent context bundle (F07)", () => {
     expect(ctx.items.some((i) => i.rel === "design/auth.md")).toBe(true);
     expect(ctx.items.some((i) => i.status === "archived")).toBe(false);
     expect(ctx.truncatedBy).toBe(null); // only 2 visible docs, under the cap
-  });
-
-  it("boosts pinned and recently-opened docs in the overview", () => {
-    core.recordOpen(vault, "p", "plan/old.md");
-    core.pin(vault, "p", "plan/old.md");
-    const ctx = core.buildContext(vault, "p");
-    expect(ctx.items[0].rel).toBe("plan/old.md"); // pin + recent outweighs the active design
   });
 
   it("never includes docs from another project's scope", () => {
@@ -485,40 +323,10 @@ describe("onboarding & scope self-heal (F05)", () => {
   });
 });
 
-describe("safe delete, undo & overwrite protection (F10)", () => {
+describe("overwrite protection & delete", () => {
   beforeEach(() => core.registerProject(vault, "p", path.join(tmp, "p")));
 
-  it("rm soft-deletes to trash and is restorable", () => {
-    core.writeDoc(vault, "p", "debug", "login", "# login\nsecret");
-    core.removeDoc(vault, "p", "debug/login.md");
-    expect(core.listDocs(vault, "p").some((d) => d.name === "login.md")).toBe(false);
-    const trash = core.listTrash(vault, "p");
-    expect(trash.length).toBe(1);
-    expect(trash[0].rel).toBe("debug/login.md");
-    expect(core.restoreDoc(vault, "p", trash[0].name)).toBe("debug/login.md");
-    expect(core.readDoc(vault, "p", "debug/login.md")).toContain("secret");
-  });
-
-  it("undo reverts the last rm", () => {
-    core.writeDoc(vault, "p", "design", "a", "# A");
-    core.removeDoc(vault, "p", "design/a.md");
-    expect(core.undo(vault, "p")).toContain("rm");
-    expect(core.listDocs(vault, "p").some((d) => d.name === "a.md")).toBe(true);
-  });
-
-  it("undo reverts the last mv", () => {
-    core.writeDoc(vault, "p", "debug", "x", "# X");
-    core.moveDoc(vault, "p", "debug/x.md", "design");
-    core.undo(vault, "p");
-    expect(core.listDocs(vault, "p", "debug").some((d) => d.name === "x.md")).toBe(true);
-    expect(core.listDocs(vault, "p", "design").some((d) => d.name === "x.md")).toBe(false);
-  });
-
-  it("throws when there is nothing to undo", () => {
-    expect(() => core.undo(vault, "p")).toThrow(/没有可撤销/);
-  });
-
-  it("add refuses to overwrite without force; --force backs up and undo restores old", () => {
+  it("add refuses to overwrite without force; --force overwrites (prior version in git)", () => {
     core.writeDoc(vault, "p", "design", "arch", "# Arch OLD");
     const src = path.join(tmp, "arch.md");
     fs.writeFileSync(src, "# Arch NEW");
@@ -527,8 +335,6 @@ describe("safe delete, undo & overwrite protection (F10)", () => {
     ).toThrow(/已存在/);
     core.addDoc(vault, "p", "design", src, { newName: "arch.md", failIfExists: true, force: true });
     expect(core.readDoc(vault, "p", "design/arch.md")).toContain("NEW");
-    core.undo(vault, "p");
-    expect(core.readDoc(vault, "p", "design/arch.md")).toContain("OLD"); // old content restored
   });
 
   it("mv refuses to overwrite an existing target without force", () => {
@@ -537,58 +343,10 @@ describe("safe delete, undo & overwrite protection (F10)", () => {
     expect(() => core.moveDoc(vault, "p", "debug/dup.md", "design")).toThrow(/已存在/);
   });
 
-  it("rejects trash paths that escape project scope", () => {
-    expect(() => core.restoreDoc(vault, "p", "../../etc/passwd")).toThrow();
-  });
-});
-
-describe("batch operations (F11)", () => {
-  beforeEach(() => {
-    core.initVault(vault, true); // git, so we can assert single-commit batches
-    core.registerProject(vault, "p", path.join(tmp, "p"));
-    core.writeDoc(vault, "p", "debug", "a", "# A");
-    core.writeDoc(vault, "p", "debug", "b", "# B");
-    core.writeDoc(vault, "p", "debug", "c", "# C");
-  });
-
-  it("batchSetStatus updates the whole selection in one commit", () => {
-    const res = core.batchSetStatus(vault, "p", ["debug/a.md", "debug/b.md", "debug/c.md"], "done");
-    expect(res.ok.length).toBe(3);
-    expect(core.listDocs(vault, "p").every((d) => d.status === "done")).toBe(true);
-    expect(core.uncommittedCount(vault)).toBe(0);
-    const la = core.logDoc(vault, "p", "debug/a.md");
-    const lb = core.logDoc(vault, "p", "debug/b.md");
-    expect(la[0].subject).toContain("batch status");
-    expect(la[0].hash).toBe(lb[0].hash); // same single commit
-  });
-
-  it("batchMove relocates the selection to a new type in one commit", () => {
-    const res = core.batchMove(vault, "p", ["debug/a.md", "debug/b.md"], "design");
-    expect(res.ok.length).toBe(2);
-    expect(core.listDocs(vault, "p", "design").length).toBe(2);
-    expect(core.logDoc(vault, "p", "design/a.md")[0].subject).toContain("batch mv");
-  });
-
-  it("batchAddTags merges a tag across the selection", () => {
-    core.batchAddTags(vault, "p", ["debug/a.md", "debug/b.md"], ["legacy"]);
-    const docs = core.listDocs(vault, "p");
-    expect(docs.find((d) => d.name === "a.md")!.tags).toContain("legacy");
-    expect(docs.find((d) => d.name === "b.md")!.tags).toContain("legacy");
-    expect(docs.find((d) => d.name === "c.md")!.tags).not.toContain("legacy");
-  });
-
-  it("batchRemove soft-deletes the selection to trash (recoverable)", () => {
-    const res = core.batchRemove(vault, "p", ["debug/a.md", "debug/b.md"]);
-    expect(res.ok.length).toBe(2);
-    expect(core.listDocs(vault, "p").length).toBe(1); // only c remains
-    expect(core.listTrash(vault, "p").length).toBe(2);
-  });
-
-  it("collects per-item errors without aborting the batch", () => {
-    const res = core.batchSetStatus(vault, "p", ["debug/a.md", "debug/ghost.md"], "done");
-    expect(res.ok).toEqual(["debug/a.md"]);
-    expect(res.errors.length).toBe(1);
-    expect(res.errors[0].rel).toBe("debug/ghost.md");
+  it("removeDoc deletes the file", () => {
+    core.writeDoc(vault, "p", "debug", "login", "# login\nsecret");
+    core.removeDoc(vault, "p", "debug/login.md");
+    expect(core.listDocs(vault, "p").some((d) => d.name === "login.md")).toBe(false);
   });
 });
 
@@ -694,30 +452,7 @@ describe("governed cross-project access (F15)", () => {
   });
 });
 
-describe("doc links & backlinks (F12)", () => {
-  beforeEach(() => core.registerProject(vault, "p", path.join(tmp, "p")));
-
-  it("computes outlinks, backlinks, and broken links in scope", () => {
-    core.writeDoc(vault, "p", "design", "auth", "# 鉴权改造\n见 [[debug/login]] 和 [[ghost-zzz]]");
-    core.writeDoc(vault, "p", "debug", "login", "# 登录排查\n参考 [[design/auth]]");
-    const a = core.getLinks(vault, "p", "design/auth.md");
-    expect(a.outlinks.find((o) => o.raw === "debug/login")!.rel).toBe("debug/login.md");
-    expect(a.broken).toContain("ghost-zzz");
-    expect(a.backlinks).toContain("debug/login.md");
-  });
-
-  it("INDEX includes a relationships section and flags broken links", () => {
-    core.writeDoc(vault, "p", "design", "auth", "# 鉴权改造\n见 [[debug/login]] 和 [[ghost-zzz]]");
-    core.writeDoc(vault, "p", "debug", "login", "# 登录排查\nbody");
-    const idx = fs.readFileSync(core.generateIndex(vault, "p"), "utf-8");
-    expect(idx).toContain("## 关系");
-    expect(idx).toContain("(design/auth.md) → debug/login.md");
-    expect(idx).toContain("## ⚠ 失效链接");
-    expect(idx).toContain("ghost-zzz");
-  });
-});
-
-describe("agent review inbox (F22)", () => {
+describe("agent write metadata (F20)", () => {
   beforeEach(() => core.registerProject(vault, "p", path.join(tmp, "p")));
 
   it("stamps agent writes as source:agent / review:pending; human writes are not", () => {
@@ -728,27 +463,6 @@ describe("agent review inbox (F22)", () => {
     expect(agent.source).toBe("agent");
     expect(agent.review).toBe("pending");
     expect(core.listDocs(vault, "p").find((d) => d.name === "humandoc.md")!.review).toBeUndefined();
-  });
-
-  it("listPending returns only pending docs", () => {
-    const a = wroteRel(core.smartWrite(vault, "p", "debug", "p1", "# Alpha\nlorem ipsum content here"));
-    const b = wroteRel(core.smartWrite(vault, "p", "debug", "p2", "# Beta\ntotally different words zzz"));
-    core.writeDoc(vault, "p", "design", "h", "# H\nbody");
-    expect(core.listPending(vault, "p").map((d) => d.rel).sort()).toEqual([a, b].sort());
-  });
-
-  it("setReview approved removes a doc from the inbox, preserving the body", () => {
-    const rel = wroteRel(core.smartWrite(vault, "p", "debug", "x", "# X\nimportant body"));
-    expect(core.listPending(vault, "p").some((d) => d.rel === rel)).toBe(true);
-    core.setReview(vault, "p", rel, "approved");
-    expect(core.listPending(vault, "p").some((d) => d.rel === rel)).toBe(false);
-    expect(core.listDocs(vault, "p").find((d) => d.rel === rel)!.review).toBe("approved");
-    expect(core.readDoc(vault, "p", rel)).toContain("important body");
-  });
-
-  it("setReview rejects an invalid state", () => {
-    core.smartWrite(vault, "p", "debug", "x", "# X");
-    expect(() => core.setReview(vault, "p", "debug/x.md", "maybe")).toThrow(/Invalid review/);
   });
 });
 
@@ -812,14 +526,6 @@ describe("smart write: dedupe / append / merge (F20)", () => {
     const m = core.smartWrite(vault, "p", "debug", "x", "# X\nmerge candidate", "merge");
     expect(m.status).toBe("merge_preview");
     if (m.status === "merge_preview") expect(m.preview).toContain("REPLACED"); // existing side kept
-  });
-
-  it("smartWrite 'replace' backs up the old content so undo restores it", () => {
-    core.writeDoc(vault, "p", "debug", "x", "# X\noriginal content");
-    core.smartWrite(vault, "p", "debug", "x", "# X\nreplaced content", "replace");
-    expect(core.readDoc(vault, "p", "debug/x.md")).toContain("replaced content");
-    core.undo(vault, "p"); // F10 undo of the forced overwrite
-    expect(core.readDoc(vault, "p", "debug/x.md")).toContain("original content"); // restored
   });
 });
 

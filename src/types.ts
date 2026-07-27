@@ -16,8 +16,6 @@ export interface Config {
   version: number;
   types: string[];
   projects: Record<string, ProjectMeta>;
-  /** Days after which an active design/plan is flagged ⚠ stale (F03). */
-  staleDays: number;
   /** Vault git auto-commit policy (F08): auto on every write, manual via
    *  `docky sync`, or off. */
   autocommit: AutocommitMode;
@@ -54,7 +52,6 @@ export interface DocInfo {
   status: DocStatus; // from frontmatter; defaults to "active" (F03)
   tags: string[]; // from frontmatter; defaults to [] (F03)
   mtime: number; // file modified time (ms epoch)
-  stale: boolean; // active design/plan past the stale threshold (F03)
   source?: string; // "human" | "agent" — who wrote it (F22)
   review?: string; // "pending" | "approved" — review state (F22)
 }

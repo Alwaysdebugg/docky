@@ -22,7 +22,6 @@ import {
   saveConfig,
 } from "./config.js";
 import { loadTemplate, renderTemplate, writeDefaultTemplates } from "./templates.js";
-import { ResolvedLink, buildBacklinks, outlinksOf } from "./links.js";
 import { fuzzyScore } from "./match.js";
 
 // --------------------------------------------------------------------------- //
@@ -86,44 +85,6 @@ export function autoCommitVault(vault: string, message: string): void {
   if (loadConfig(vault).autocommit === "auto") commitVault(vault, message);
 }
 
-export interface DocCommit {
-  hash: string;
-  date: string;
-  subject: string;
-}
-
-/** Commit history for one document (scope-checked path). */
-export function logDoc(vault: string, project: string, rel: string): DocCommit[] {
-  const abs = safePath(vault, project, rel);
-  if (!isGitRepo(vault)) return [];
-  const out = git(vault, [
-    "log",
-    "--format=%h%x09%ad%x09%s",
-    "--date=short",
-    "--",
-    path.relative(vault, abs),
-  ]);
-  if (!out) return [];
-  return out
-    .split("\n")
-    .filter(Boolean)
-    .map((l) => {
-      const [hash, date, ...rest] = l.split("\t");
-      return { hash, date, subject: rest.join("\t") };
-    });
-}
-
-/** Unified diff for a document, optionally between revisions (scope-checked). */
-export function diffDoc(vault: string, project: string, rel: string, revA?: string, revB?: string): string {
-  const abs = safePath(vault, project, rel);
-  if (!isGitRepo(vault)) return "";
-  const args = ["diff"];
-  if (revA && revB) args.push(revA, revB);
-  else if (revA) args.push(revA);
-  args.push("--", path.relative(vault, abs));
-  return git(vault, args) ?? "";
-}
-
 /** Commit pending changes (manual sync); optionally push to a configured remote. */
 export function syncVault(vault: string, push = false): { changes: number; committed: boolean; pushed: boolean } {
   const changes = uncommittedCount(vault);
@@ -161,12 +122,6 @@ export function initVault(vault: string, useGit = true): string {
   writeDefaultTemplates(vault); // F06: seed per-type scaffolding templates
   if (useGit && !fs.existsSync(path.join(vault, ".git"))) {
     git(vault, ["init", "-q"]);
-    // Keep per-project state, trash, oplog, history, and folders out of git.
-    fs.writeFileSync(
-      path.join(vault, ".gitignore"),
-      "**/.docky-state.json\n**/.docky-oplog.json\n**/.docky-history\n**/.docky-folders.json\n**/.trash/\n",
-      "utf-8"
-    );
   }
   return vault;
 }
@@ -494,19 +449,10 @@ function safeMtimeMs(filePath: string): number {
   }
 }
 
-/** A doc is "stale" when an active design/plan has not changed in staleDays. */
-function computeStale(type: string, status: DocStatus, mtime: number, staleDays: number, now: number): boolean {
-  if (status !== "active") return false;
-  if (type !== "design" && type !== "plan") return false;
-  return now - mtime > staleDays * 86_400_000;
-}
-
 export function listDocs(vault: string, project: string, docType?: string): DocInfo[] {
   const types = docType ? [validateType(docType)] : [...DOC_TYPES];
   const out: DocInfo[] = [];
   const base = projectDir(vault, project);
-  const staleDays = loadConfig(vault).staleDays ?? 30;
-  const now = Date.now();
   for (const t of types) {
     const d = path.join(base, t);
     if (!fs.existsSync(d) || !fs.statSync(d).isDirectory()) continue;
@@ -525,7 +471,6 @@ export function listDocs(vault: string, project: string, docType?: string): DocI
         status: meta.status,
         tags: meta.tags,
         mtime,
-        stale: computeStale(t, meta.status, mtime, staleDays, now),
         source: meta.source,
         review: meta.review,
       });
@@ -537,7 +482,6 @@ export function listDocs(vault: string, project: string, docType?: string): DocI
 export interface DocFilter {
   status?: string;
   tag?: string;
-  stale?: boolean;
   /** Include archived docs (hidden by default unless status==="archived"). */
   includeArchived?: boolean;
 }
@@ -551,7 +495,6 @@ export function filterDocs(docs: DocInfo[], f: DocFilter = {}): DocInfo[] {
     if (!f.includeArchived && wantStatus !== "archived" && d.status === "archived") return false;
     if (wantStatus && d.status !== wantStatus) return false;
     if (wantTag && !d.tags.includes(wantTag)) return false;
-    if (f.stale && !d.stale) return false;
     return true;
   });
 }
@@ -601,61 +544,6 @@ export function addTags(
   return p;
 }
 
-// --------------------------------------------------------------------------- //
-// Batch operations (F11) — each runs over a selection as a single commit
-// --------------------------------------------------------------------------- //
-export interface BatchResult {
-  ok: string[];
-  errors: { rel: string; error: string }[];
-}
-
-function batchEach(rels: string[], fn: (rel: string) => void): BatchResult {
-  const ok: string[] = [];
-  const errors: { rel: string; error: string }[] = [];
-  for (const rel of rels) {
-    try {
-      fn(rel);
-      ok.push(rel);
-    } catch (e) {
-      errors.push({ rel, error: (e as Error).message });
-    }
-  }
-  return { ok, errors };
-}
-
-export function batchRemove(vault: string, project: string, rels: string[]): BatchResult {
-  const r = batchEach(rels, (rel) => removeDoc(vault, project, rel, { noCommit: true }));
-  if (r.ok.length) autoCommitVault(vault, `batch rm: ${r.ok.length} 篇`);
-  return r;
-}
-
-export function batchMove(
-  vault: string,
-  project: string,
-  rels: string[],
-  destType: string,
-  opts: { force?: boolean } = {}
-): BatchResult {
-  validateType(destType);
-  const r = batchEach(rels, (rel) => {
-    moveDoc(vault, project, rel, destType, undefined, { force: opts.force, noCommit: true });
-  });
-  if (r.ok.length) autoCommitVault(vault, `batch mv → ${destType}: ${r.ok.length} 篇`);
-  return r;
-}
-
-export function batchSetStatus(vault: string, project: string, rels: string[], status: string): BatchResult {
-  const r = batchEach(rels, (rel) => setStatus(vault, project, rel, status, { noCommit: true }));
-  if (r.ok.length) autoCommitVault(vault, `batch status ${status.toLowerCase()}: ${r.ok.length} 篇`);
-  return r;
-}
-
-export function batchAddTags(vault: string, project: string, rels: string[], tags: string[]): BatchResult {
-  const r = batchEach(rels, (rel) => addTags(vault, project, rel, tags, { noCommit: true }));
-  if (r.ok.length) autoCommitVault(vault, `batch tag: ${r.ok.length} 篇`);
-  return r;
-}
-
 export function addDoc(
   vault: string,
   project: string,
@@ -668,9 +556,9 @@ export function addDoc(
     noCommit?: boolean;
     tags?: string[];
     status?: string;
-    /** Refuse to overwrite an existing target unless force is set (F10). */
+    /** Refuse to overwrite an existing target unless force is set. */
     failIfExists?: boolean;
-    /** Overwrite an existing target, backing the old content up to .trash (F10). */
+    /** Overwrite an existing target (the previous version stays in git history). */
     force?: boolean;
   } = {}
 ): string {
@@ -699,8 +587,7 @@ export function addDoc(
       "\n" +
       text;
   }
-  if (exists && opts.force) backupOverwrite(vault, project, rel); // recoverable via undo
-  fs.writeFileSync(dest, text, "utf-8");
+  fs.writeFileSync(dest, text, "utf-8"); // force overwrite: prior version stays in git history
   if (!opts.noCommit) autoCommitVault(vault, `add(${docType}): ${path.basename(dest)}`);
   return dest;
 }
@@ -745,8 +632,8 @@ export function readDoc(vault: string, project: string, rel: string): string {
   return fs.readFileSync(p, "utf-8");
 }
 
-/** Soft-delete: move the doc into the project's `.trash/` (recoverable via
- *  restoreDoc / undo) rather than unlinking it outright (F10). */
+/** Delete a doc. The removal is auto-committed to the vault, so the file stays
+ *  recoverable from git history. */
 export function removeDoc(
   vault: string,
   project: string,
@@ -757,9 +644,7 @@ export function removeDoc(
   if (!fs.existsSync(p) || !fs.statSync(p).isFile()) {
     throw new DockyError(`Document not found: ${rel}`);
   }
-  const trash = moveToTrash(vault, project, rel);
-  logOp(vault, project, { op: "rm", rel, trash, ts: Date.now() });
-  forgetRel(vault, project, rel); // drop from recents/pins
+  fs.unlinkSync(p);
   if (!opts.noCommit) autoCommitVault(vault, `rm: ${rel}`);
 }
 
@@ -780,146 +665,13 @@ export function moveDoc(
   if (!name.endsWith(".md")) name += ".md";
   const destRel = `${destType}/${name}`;
   const dest = safePath(vault, project, destRel);
-  if (fs.existsSync(dest)) {
-    if (!opts.force) throw new DockyError(`${destRel} 已存在。--force 覆盖,或改名。`);
-    backupOverwrite(vault, project, destRel); // recoverable via undo
+  if (fs.existsSync(dest) && !opts.force) {
+    throw new DockyError(`${destRel} 已存在。--force 覆盖,或改名。`);
   }
   fs.mkdirSync(path.dirname(dest), { recursive: true });
-  fs.renameSync(src, dest);
-  forgetRel(vault, project, rel); // the old location is now stale
-  logOp(vault, project, { op: "mv", from: rel, to: `${destType}/${path.basename(dest)}`, ts: Date.now() });
+  fs.renameSync(src, dest); // force overwrite: prior version stays in git history
   if (!opts.noCommit) autoCommitVault(vault, `mv: ${rel} → ${destType}/${path.basename(dest)}`);
   return dest;
-}
-
-// --------------------------------------------------------------------------- //
-// Trash, oplog & undo (F10)
-// --------------------------------------------------------------------------- //
-const OPLOG_FILE = ".docky-oplog.json";
-const OPLOG_MAX = 50;
-
-type OpEntry =
-  | { op: "rm"; rel: string; trash: string; ts: number }
-  | { op: "mv"; from: string; to: string; ts: number }
-  | { op: "overwrite"; rel: string; trash: string; ts: number };
-
-function loadOplog(vault: string, project: string): OpEntry[] {
-  try {
-    const data = JSON.parse(fs.readFileSync(safePath(vault, project, OPLOG_FILE), "utf-8"));
-    return Array.isArray(data) ? (data as OpEntry[]) : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveOplog(vault: string, project: string, ops: OpEntry[]): void {
-  fs.writeFileSync(safePath(vault, project, OPLOG_FILE), JSON.stringify(ops.slice(-OPLOG_MAX), null, 2), "utf-8");
-}
-
-function logOp(vault: string, project: string, entry: OpEntry): void {
-  const ops = loadOplog(vault, project);
-  ops.push(entry);
-  saveOplog(vault, project, ops);
-}
-
-/** Move a doc into the project's `.trash/` (timestamped, reversible). Returns
- *  the trash-relative path. The original rel is URI-encoded into the name. */
-function moveToTrash(vault: string, project: string, rel: string): string {
-  const trashRel = `.trash/${Date.now()}__${encodeURIComponent(rel)}`;
-  const dest = safePath(vault, project, trashRel);
-  fs.mkdirSync(path.dirname(dest), { recursive: true });
-  fs.renameSync(safePath(vault, project, rel), dest);
-  return trashRel;
-}
-
-/** Back up the doc currently at `rel` to trash and log it, so a forced
- *  overwrite can be undone (F10). */
-function backupOverwrite(vault: string, project: string, rel: string): void {
-  const trash = moveToTrash(vault, project, rel);
-  logOp(vault, project, { op: "overwrite", rel, trash, ts: Date.now() });
-}
-
-function decodeTrashName(name: string): { rel: string; deletedAt: number } | null {
-  const idx = name.indexOf("__");
-  if (idx < 0) return null;
-  let rel: string;
-  try {
-    rel = decodeURIComponent(name.slice(idx + 2));
-  } catch {
-    rel = name.slice(idx + 2);
-  }
-  return { rel, deletedAt: Number(name.slice(0, idx)) || 0 };
-}
-
-export interface TrashEntry {
-  name: string;
-  rel: string;
-  deletedAt: number;
-}
-
-/** List the project's recoverable trash entries, newest first. */
-export function listTrash(vault: string, project: string): TrashEntry[] {
-  const dir = safePath(vault, project, ".trash");
-  if (!fs.existsSync(dir)) return [];
-  const out: TrashEntry[] = [];
-  for (const name of fs.readdirSync(dir)) {
-    const d = decodeTrashName(name);
-    if (d) out.push({ name, rel: d.rel, deletedAt: d.deletedAt });
-  }
-  return out.sort((a, b) => b.deletedAt - a.deletedAt);
-}
-
-/** Restore a trashed doc back to its original location (scope-checked). */
-export function restoreDoc(vault: string, project: string, name: string): string {
-  const src = safePath(vault, project, `.trash/${name}`);
-  if (!fs.existsSync(src)) throw new DockyError(`回收站中没有: ${name}`);
-  const decoded = decodeTrashName(name);
-  if (!decoded) throw new DockyError(`无法解析回收站条目: ${name}`);
-  const dest = safePath(vault, project, decoded.rel);
-  if (fs.existsSync(dest)) throw new DockyError(`目标已存在,无法还原: ${decoded.rel}`);
-  fs.mkdirSync(path.dirname(dest), { recursive: true });
-  fs.renameSync(src, dest);
-  autoCommitVault(vault, `restore: ${decoded.rel}`);
-  return decoded.rel;
-}
-
-/** Reverse the most recent write op (rm / mv / forced overwrite). Returns a
- *  human description, or throws if there is nothing to undo (F10). */
-export function undo(vault: string, project: string): string {
-  const ops = loadOplog(vault, project);
-  const last = ops.pop();
-  if (!last) throw new DockyError("没有可撤销的操作");
-  let desc: string;
-  if (last.op === "rm") {
-    const trash = safePath(vault, project, last.trash);
-    const dest = safePath(vault, project, last.rel);
-    if (fs.existsSync(trash) && !fs.existsSync(dest)) {
-      fs.mkdirSync(path.dirname(dest), { recursive: true });
-      fs.renameSync(trash, dest);
-    }
-    desc = `rm(${last.rel}) —— 已从 .trash 还原`;
-    autoCommitVault(vault, `undo rm: ${last.rel}`);
-  } else if (last.op === "mv") {
-    const to = safePath(vault, project, last.to);
-    const from = safePath(vault, project, last.from);
-    if (fs.existsSync(to)) {
-      fs.mkdirSync(path.dirname(from), { recursive: true });
-      fs.renameSync(to, from);
-    }
-    desc = `mv(${last.from} → ${last.to}) —— 已回退`;
-    autoCommitVault(vault, `undo mv: ${last.to} → ${last.from}`);
-  } else {
-    const trash = safePath(vault, project, last.trash);
-    const dest = safePath(vault, project, last.rel);
-    if (fs.existsSync(trash)) {
-      if (fs.existsSync(dest)) fs.unlinkSync(dest);
-      fs.renameSync(trash, dest);
-    }
-    desc = `overwrite(${last.rel}) —— 已恢复旧内容`;
-    autoCommitVault(vault, `undo overwrite: ${last.rel}`);
-  }
-  saveOplog(vault, project, ops);
-  return desc;
 }
 
 const SNIPPET_MAX = 3; // snippets kept per doc
@@ -946,8 +698,8 @@ function highlight(text: string, q: string): string {
 /**
  * Search a project's docs (F13): relevance-scored, multi-snippet, with hit
  * highlighting and optional fuzzy matching. Sorted best-first. Title/name hits
- * outweigh body hits; status (F03) and recency (F04) feed the score. Archived
- * docs are excluded by default (via filter). Scope isolation is unchanged.
+ * outweigh body hits; status (F03) feeds the score. Archived docs are excluded
+ * by default (via filter). Scope isolation is unchanged.
  */
 export function searchDocs(
   vault: string,
@@ -960,10 +712,6 @@ export function searchDocs(
   const q = query.toLowerCase().trim();
   if (!q) return [];
   const maxSnip = opts.maxSnippets ?? SNIPPET_MAX;
-
-  const recents = getRecents(vault, project);
-  const recentRank = new Map<string, number>();
-  recents.forEach((rel, i) => recentRank.set(rel, recents.length - i));
 
   const hits: SearchHit[] = [];
   for (const doc of filterDocs(listDocs(vault, project, docType), filter)) {
@@ -995,7 +743,6 @@ export function searchDocs(
     if (titleHit) score += 8;
     score += Math.min(bodyHits, 5) * 2;
     score += doc.status === "active" ? 3 : doc.status === "draft" ? 1 : 0;
-    score += recentRank.get(doc.rel) ?? 0;
     if (fuzzyOnly) score += 2;
 
     const first = snippets[0] ?? { line: 0, text: highlight(doc.title, q) };
@@ -1243,7 +990,7 @@ export function smartWrite(
   const fileName = name.endsWith(".md") ? name : `${name}.md`;
   const rel = `${docType}/${fileName}`;
   const exists = docFileExists(vault, project, rel);
-  // Agent writes are stamped for the F22 review inbox.
+  // Agent writes carry source/review metadata in frontmatter (harmless if unused).
   const stamped = stampFrontmatter(content, { source: "agent", review: "pending" });
 
   // Create a fresh, date-stamped file — used by every path that generates a new
@@ -1256,15 +1003,13 @@ export function smartWrite(
   if (mode === "append") {
     if (exists) {
       appendDoc(vault, project, rel, content);
-      setReview(vault, project, rel, "pending"); // new agent content re-enters review
       return { status: "appended", rel };
     }
     return createNew();
   }
   if (mode === "replace") {
     if (exists) {
-      backupOverwrite(vault, project, rel); // back up old content first → undo-able (F10 consistency)
-      writeDoc(vault, project, docType, name, stamped); // overwrite keeps the existing name
+      writeDoc(vault, project, docType, name, stamped); // overwrite keeps the existing name (prior version in git)
       return { status: "written", rel };
     }
     return createNew();
@@ -1297,178 +1042,14 @@ export function smartWrite(
 }
 
 // --------------------------------------------------------------------------- //
-// Agent-output review inbox (F22)
+// Doc existence check (scope-checked) — used by smart write (F20)
 // --------------------------------------------------------------------------- //
-/** Documents awaiting human review (source: agent, review: pending). */
-export function listPending(vault: string, project: string): DocInfo[] {
-  return listDocs(vault, project).filter((d) => d.review === "pending");
-}
-
-/** Set a document's review state by rewriting its frontmatter (F22). */
-export function setReview(vault: string, project: string, rel: string, state: string): string {
-  if (state !== "pending" && state !== "approved") {
-    throw new DockyError(`Invalid review state '${state}'. Allowed: pending, approved`);
-  }
-  const p = safePath(vault, project, rel);
-  if (!fs.existsSync(p) || !fs.statSync(p).isFile()) {
-    throw new DockyError(`Document not found: ${rel}`);
-  }
-  fs.writeFileSync(p, stampFrontmatter(fs.readFileSync(p, "utf-8"), { review: state }), "utf-8");
-  autoCommitVault(vault, `review(${rel}): ${state}`);
-  return p;
-}
-
-// --------------------------------------------------------------------------- //
-// Per-project state: recents & pins (F04)
-// --------------------------------------------------------------------------- //
-// Stored at projects/<project>/.docky-state.json — still inside the project
-// scope, so it is covered by the same safePath isolation. Never throws on a
-// missing/corrupt file: it just resets, so recency tracking can't crash docky.
-const STATE_FILE = ".docky-state.json";
-const RECENTS_MAX = 10;
-
-interface ProjectState {
-  recents: string[];
-  pins: string[];
-}
-
-function emptyState(): ProjectState {
-  return { recents: [], pins: [] };
-}
-
-function statePath(vault: string, project: string): string {
-  return safePath(vault, project, STATE_FILE);
-}
-
-function loadState(vault: string, project: string): ProjectState {
-  const p = statePath(vault, project);
-  if (!fs.existsSync(p)) return emptyState();
-  try {
-    const data = JSON.parse(fs.readFileSync(p, "utf-8")) as Partial<ProjectState>;
-    const strings = (a: unknown): string[] =>
-      Array.isArray(a) ? a.filter((x): x is string => typeof x === "string") : [];
-    return { recents: strings(data.recents), pins: strings(data.pins) };
-  } catch {
-    return emptyState(); // corrupt → reset rather than crash
-  }
-}
-
-function saveState(vault: string, project: string, state: ProjectState): void {
-  const p = statePath(vault, project);
-  fs.mkdirSync(path.dirname(p), { recursive: true });
-  fs.writeFileSync(p, JSON.stringify(state, null, 2), "utf-8");
-}
-
-/** Canonical "type/name" form of a doc rel, scope-checked. */
-function canonicalRel(vault: string, project: string, rel: string): string {
-  const abs = safePath(vault, project, rel);
-  return path.relative(projectDir(vault, project), abs).split(path.sep).join("/");
-}
-
 function docFileExists(vault: string, project: string, rel: string): boolean {
   try {
     const abs = safePath(vault, project, rel);
     return fs.existsSync(abs) && fs.statSync(abs).isFile();
   } catch {
     return false;
-  }
-}
-
-/** Drop recents/pins entries whose files no longer exist; persist if changed. */
-function pruneState(vault: string, project: string, state: ProjectState): ProjectState {
-  const recents = state.recents.filter((r) => docFileExists(vault, project, r));
-  const pins = state.pins.filter((r) => docFileExists(vault, project, r));
-  if (recents.length !== state.recents.length || pins.length !== state.pins.length) {
-    const cleaned = { recents, pins };
-    saveState(vault, project, cleaned);
-    return cleaned;
-  }
-  return state;
-}
-
-/** Record that a document was opened: most-recent-first, de-duped, capped. */
-export function recordOpen(vault: string, project: string, rel: string): void {
-  let key: string;
-  try {
-    key = canonicalRel(vault, project, rel);
-  } catch {
-    return; // out-of-scope path: ignore (recency is a side-channel, never throw)
-  }
-  const state = loadState(vault, project);
-  const recents = [key, ...state.recents.filter((r) => r !== key)].slice(0, RECENTS_MAX);
-  saveState(vault, project, { recents, pins: state.pins });
-}
-
-/** Most-recently-opened docs (newest first), pruned of stale entries. */
-export function getRecents(vault: string, project: string, limit = RECENTS_MAX): string[] {
-  const state = pruneState(vault, project, loadState(vault, project));
-  return state.recents.slice(0, limit);
-}
-
-/** Pin a document so it stays at the top of the homepage / quick-open. */
-export function pin(vault: string, project: string, rel: string): void {
-  const key = canonicalRel(vault, project, rel);
-  if (!docFileExists(vault, project, key)) throw new DockyError(`Document not found: ${rel}`);
-  const state = loadState(vault, project);
-  if (state.pins.includes(key)) return;
-  saveState(vault, project, { recents: state.recents, pins: [...state.pins, key] });
-}
-
-export function unpin(vault: string, project: string, rel: string): void {
-  const key = canonicalRel(vault, project, rel);
-  const state = loadState(vault, project);
-  const pins = state.pins.filter((r) => r !== key);
-  if (pins.length !== state.pins.length) saveState(vault, project, { recents: state.recents, pins });
-}
-
-/** Pinned docs (in pin order), pruned of stale entries. */
-export function getPins(vault: string, project: string): string[] {
-  return pruneState(vault, project, loadState(vault, project)).pins;
-}
-
-/** Remove a rel from recents/pins — used after rm/mv invalidates a location. */
-function forgetRel(vault: string, project: string, rel: string): void {
-  const key = rel.split(path.sep).join("/");
-  const state = loadState(vault, project);
-  const recents = state.recents.filter((r) => r !== key);
-  const pins = state.pins.filter((r) => r !== key);
-  if (recents.length !== state.recents.length || pins.length !== state.pins.length) {
-    saveState(vault, project, { recents, pins });
-  }
-}
-
-// --------------------------------------------------------------------------- //
-// REPL command history (F14)
-// --------------------------------------------------------------------------- //
-const HISTORY_FILE = ".docky-history";
-const HISTORY_MAX = 200;
-
-/** Load the project's REPL command history (oldest → newest). */
-export function loadHistory(vault: string, project: string): string[] {
-  try {
-    return fs.readFileSync(safePath(vault, project, HISTORY_FILE), "utf-8").split("\n").filter(Boolean);
-  } catch {
-    return [];
-  }
-}
-
-/** Append a command to the project's history (dedup consecutive, capped). */
-export function pushHistory(vault: string, project: string, cmd: string): void {
-  const c = cmd.trim();
-  if (!c) return;
-  let key: string;
-  try {
-    key = safePath(vault, project, HISTORY_FILE);
-  } catch {
-    return;
-  }
-  const hist = loadHistory(vault, project);
-  if (hist[hist.length - 1] === c) return; // skip immediate repeats
-  hist.push(c);
-  try {
-    fs.writeFileSync(key, hist.slice(-HISTORY_MAX).join("\n") + "\n", "utf-8");
-  } catch {
-    /* best-effort */
   }
 }
 
@@ -1512,10 +1093,9 @@ function firstParagraph(body: string): string {
 }
 
 /**
- * Build a ranked, freshness-filtered, budget-bounded bundle of the project's
- * most relevant docs for an agent (F07). Composes F01 (relevance), F03 (status,
- * archived excluded), and F04 (recents/pins) — each degrades gracefully if
- * absent. Never leaves the project scope.
+ * Build a ranked, budget-bounded bundle of the project's most relevant docs for
+ * an agent (F07). Composes F01 (relevance) and F03 (status, archived excluded).
+ * Never leaves the project scope.
  */
 export function buildContext(
   vault: string,
@@ -1527,11 +1107,6 @@ export function buildContext(
   const all = listDocs(vault, scope);
   const archivedCount = all.filter((d) => d.status === "archived").length;
   const docs = filterDocs(all); // hide archived
-
-  const pins = new Set(getPins(vault, scope));
-  const recents = getRecents(vault, scope);
-  const recentRank = new Map<string, number>();
-  recents.forEach((rel, i) => recentRank.set(rel, recents.length - i));
 
   const terms = query ? query.toLowerCase().split(/\s+/).filter(Boolean) : [];
   const snippetByRel = new Map<string, string>();
@@ -1565,9 +1140,6 @@ export function buildContext(
 
   function metaScore(d: DocInfo): number {
     let s = d.status === "active" ? 3 : d.status === "draft" ? 1 : 0;
-    if (pins.has(d.rel)) s += 5;
-    s += recentRank.get(d.rel) ?? 0;
-    if (d.stale) s -= 2;
     if (d.type === "design" || d.type === "plan") s += 1;
     return s;
   }
@@ -1655,7 +1227,7 @@ export function buildContext(
 }
 
 // --------------------------------------------------------------------------- //
-// Document links & backlinks (F12)
+// Body reader — shared by search / similarity / context
 // --------------------------------------------------------------------------- //
 function readBody(filePath: string): string {
   try {
@@ -1663,131 +1235,6 @@ function readBody(filePath: string): string {
   } catch {
     return "";
   }
-}
-
-/** Map of every doc's rel → its body text, for the current project. */
-function projectBodies(docs: DocInfo[]): Map<string, string> {
-  return new Map(docs.map((d) => [d.rel, readBody(d.path)]));
-}
-
-export interface DocLinks {
-  outlinks: ResolvedLink[]; // links this doc points at (rel null = broken)
-  backlinks: string[]; // rels of docs that link to this one
-  broken: string[]; // raw link targets that did not resolve in-scope
-}
-
-/** Resolve a doc's outgoing links, incoming backlinks, and broken links (F12). */
-export function getLinks(vault: string, project: string, rel: string): DocLinks {
-  const p = safePath(vault, project, rel);
-  if (!fs.existsSync(p) || !fs.statSync(p).isFile()) {
-    throw new DockyError(`Document not found: ${rel}`);
-  }
-  const docs = listDocs(vault, project);
-  const bodies = projectBodies(docs);
-  const outlinks = outlinksOf(docs, bodies.get(rel) ?? readBody(p));
-  const broken = outlinks.filter((o) => o.rel === null).map((o) => o.raw);
-  const backlinks = buildBacklinks(docs, bodies).get(rel) ?? [];
-  return { outlinks, backlinks, broken };
-}
-
-// --------------------------------------------------------------------------- //
-// INDEX generation
-// --------------------------------------------------------------------------- //
-export function generateIndex(vault: string, project: string): string {
-  const docs = filterDocs(listDocs(vault, project)); // archived hidden by default
-  const now = new Date();
-  const stamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(
-    now.getDate()
-  ).padStart(2, "0")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-  const stale = docs.filter((d) => d.stale).length;
-  const lines = [`# ${project} — 文档索引`, "", `_自动生成于 ${stamp}${stale ? ` · ⚠ ${stale} 篇可能陈旧` : ""}_`, ""];
-  if (docs.length === 0) lines.push("_(暂无文档)_");
-  for (const t of DOC_TYPES) {
-    const group = docs.filter((d) => d.type === t);
-    if (group.length === 0) continue;
-    lines.push(`## ${t}`, "");
-    for (const d of group) {
-      const mark = d.stale ? "⚠ " : "";
-      const badge = d.status !== "active" ? ` _[${d.status}]_` : "";
-      const tags = d.tags.length ? "  " + d.tags.map((t) => `#${t}`).join(" ") : "";
-      lines.push(`- ${mark}[${d.title}](${d.rel})${badge}${tags}`);
-    }
-    lines.push("");
-  }
-
-  // Relationships + broken links (F12).
-  const allDocs = listDocs(vault, project);
-  const bodies = projectBodies(allDocs);
-  const rels: string[] = [];
-  const broken: string[] = [];
-  for (const d of allDocs) {
-    const outs = outlinksOf(allDocs, bodies.get(d.rel) ?? "");
-    const ok = outs.filter((o) => o.rel).map((o) => o.rel as string);
-    if (ok.length) rels.push(`- [${d.title}](${d.rel}) → ${ok.join(", ")}`);
-    for (const b of outs.filter((o) => !o.rel)) broken.push(`- ⚠ ${d.rel} → \`[[${b.raw}]]\``);
-  }
-  if (rels.length) lines.push("## 关系", "", ...rels, "");
-  if (broken.length) lines.push("## ⚠ 失效链接", "", ...broken, "");
-
-  const base = projectDir(vault, project);
-  fs.mkdirSync(base, { recursive: true });
-  const index = path.join(base, "INDEX.md");
-  fs.writeFileSync(index, lines.join("\n"), "utf-8");
-  return index;
-}
-
-// --------------------------------------------------------------------------- //
-// Symlink + .gitignore maintenance (optional convenience)
-// --------------------------------------------------------------------------- //
-export function linkProject(vault: string, project: string, linkName = "docs"): string {
-  const cfg = loadConfig(vault);
-  const meta = cfg.projects[project];
-  if (!meta) throw new DockyError(`Unknown project: ${project}`);
-  const target = projectDir(vault, project);
-  const created: string[] = [];
-  for (const raw of meta.paths ?? []) {
-    const local = path.resolve(expand(raw));
-    if (!fs.existsSync(local) || !fs.statSync(local).isDirectory()) continue;
-    const link = path.join(local, linkName);
-    if (fs.existsSync(link) || isSymlink(link)) fs.rmSync(link, { recursive: true, force: true });
-    fs.symlinkSync(target, link, "dir");
-    ensureGitignore(local, linkName);
-    created.push(link);
-  }
-  meta.link = true;
-  saveConfig(vault, cfg);
-  if (created.length === 0) throw new DockyError(`No valid local path found for project '${project}'.`);
-  return created[0];
-}
-
-export function unlinkProject(vault: string, project: string, linkName = "docs"): void {
-  const cfg = loadConfig(vault);
-  const meta = cfg.projects[project];
-  if (!meta) throw new DockyError(`Unknown project: ${project}`);
-  for (const raw of meta.paths ?? []) {
-    const local = path.resolve(expand(raw));
-    const link = path.join(local, linkName);
-    if (isSymlink(link)) fs.unlinkSync(link);
-  }
-  meta.link = false;
-  saveConfig(vault, cfg);
-}
-
-function isSymlink(p: string): boolean {
-  try {
-    return fs.lstatSync(p).isSymbolicLink();
-  } catch {
-    return false;
-  }
-}
-
-function ensureGitignore(repo: string, entry: string): void {
-  const gi = path.join(repo, ".gitignore");
-  const line = `/${entry}`;
-  const existing = fs.existsSync(gi) ? fs.readFileSync(gi, "utf-8").split("\n") : [];
-  if (existing.includes(line) || existing.includes(entry)) return;
-  const prefix = existing.length && existing[existing.length - 1].trim() ? "\n" : "";
-  fs.appendFileSync(gi, `${prefix}# docky-managed docs symlink\n${line}\n`, "utf-8");
 }
 
 // re-export for convenience

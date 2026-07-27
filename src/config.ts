@@ -20,14 +20,11 @@ export function configPath(vault: string): string {
   return path.join(vault, CONFIG_RELPATH);
 }
 
-export const DEFAULT_STALE_DAYS = 30;
-
 export function defaultConfig(): Config {
   return {
     version: 1,
     types: [...DOC_TYPES],
     projects: {},
-    staleDays: DEFAULT_STALE_DAYS,
     autocommit: "auto",
     grants: {},
     render: { theme: "dark" },
@@ -44,7 +41,6 @@ export function loadConfig(vault: string): Config {
     version: data.version ?? 1,
     types: data.types ?? [...DOC_TYPES],
     projects: data.projects ?? {},
-    staleDays: typeof data.staleDays === "number" ? data.staleDays : DEFAULT_STALE_DAYS,
     autocommit: mode === "manual" || mode === "off" ? mode : "auto",
     grants: data.grants && typeof data.grants === "object" ? data.grants : {},
     render: {
@@ -77,17 +73,6 @@ interface ConfigKeyDef {
 }
 
 export const CONFIG_KEYS: ConfigKeyDef[] = [
-  {
-    key: "staleDays",
-    desc: "F03 陈旧阈值(天)",
-    default: String(DEFAULT_STALE_DAYS),
-    get: (c) => String(c.staleDays),
-    set: (c, v) => {
-      const n = Number(v);
-      if (!Number.isInteger(n) || n < 1) throw new DockyError("staleDays 须为正整数");
-      c.staleDays = n;
-    },
-  },
   {
     key: "autocommit",
     desc: "F08 自动提交: auto|manual|off",

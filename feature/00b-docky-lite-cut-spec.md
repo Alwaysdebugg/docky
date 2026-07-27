@@ -1,7 +1,7 @@
 ---
 title: docky-lite 收敛切割规格(Cut Spec)
 owner: PM
-status: proposal
+status: done
 updated: 2026-07-27
 ---
 
@@ -95,3 +95,7 @@ updated: 2026-07-27
 - F22 写入侧 `source: agent / review: pending` 元数据戳:审阅流已砍,戳记留作纯元数据还是一并去除?(影响 `smartWrite`)
 
 > 关联:`00-capability-map.md`(收敛总纲)。本规格是其"该收敛进 4–5 个核心能力"结论的可执行切割版。
+
+## 实现记录(2026-07-27)
+
+已在 `feat/docky-lite` 分支落地本规格:删除 TUI(`tui.tsx`/`commands.ts`/`components/`)与叶子模块(graph/stats/export/savedsearch/outline/lint/links/importer);从 `core.ts` 剥离 F10 回收站/F04 recents/F14 history/F03 陈旧/F11 批量/INDEX/symlink/log·diff;`config.ts` 去 `staleDays`;`package.json` 去 ink/react 系依赖。CLI 从 ~45 命令收敛到 ~18;`docky-mcp` 六工具 + resources + prompts 全保留。测试 253 → **114 全绿**,`tsc` 干净,CLI 与 MCP 冒烟通过。
