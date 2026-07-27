@@ -13,7 +13,7 @@ import { Severity, fixProject, lintProject } from "./lint.js";
 import { computeStats } from "./stats.js";
 import { buildGraph, graphLines, toDot } from "./graph.js";
 import { evalFolder, getFolder, listFolders, removeFolder, saveFolder } from "./savedsearch.js";
-import { DOCKY_HOOK_ENTRIES, contextText, guardDecision, mergeHooks } from "./hooks.js";
+import { DOCKY_HOOK_ENTRIES, contextText, guardDecision, mergeHooks, unmergeHooks } from "./hooks.js";
 import { applyImport, planImport } from "./importer.js";
 import { DOC_TYPES, DockyError } from "./types.js";
 
@@ -104,6 +104,23 @@ function installHooksTo(user: boolean): { file: string; added: string[] } {
   return { file, added };
 }
 
+/** Remove docky hooks from the project- or user-level Claude Code settings.
+ *  `existed` is false when there is no settings.json to touch. */
+function uninstallHooksFrom(user: boolean): { file: string; removed: string[]; existed: boolean } {
+  const dir = user ? path.join(os.homedir(), ".claude") : path.join(process.cwd(), ".claude");
+  const file = path.join(dir, "settings.json");
+  if (!fs.existsSync(file)) return { file, removed: [], existed: false };
+  let settings: Record<string, unknown> = {};
+  try {
+    settings = JSON.parse(fs.readFileSync(file, "utf-8"));
+  } catch {
+    fail(`现有 settings.json 不是合法 JSON,请先修复:${file}`);
+  }
+  const { settings: pruned, removed } = unmergeHooks(settings, DOCKY_HOOK_ENTRIES);
+  if (removed.length) fs.writeFileSync(file, JSON.stringify(pruned, null, 2) + "\n", "utf-8");
+  return { file, removed, existed: true };
+}
+
 program
   .name("docky")
   .description("Centralized Markdown doc manager with per-project scope isolation.")
@@ -150,6 +167,56 @@ program
     console.log("  claude mcp add --scope user docky -- docky-mcp     # Claude Code,全局,推荐");
     console.log('  其他客户端配置: { "mcpServers": { "docky": { "command": "docky-mcp" } } }');
     console.log("\n完成后重启 Claude Code,用 /mcp 应能看到 docky 的工具。");
+  });
+
+program
+  .command("uninstall")
+  .description(
+    "Undo docky's Claude Code integration: remove its hooks and print the remaining " +
+      "manual steps. Your vault (all your docs) is PRESERVED unless --purge-vault."
+  )
+  .option("--user", "Only touch user-level ~/.claude.")
+  .option("--project", "Only touch project-level ./.claude.")
+  .option("--purge-vault", "ALSO delete the vault directory and every document in it (destructive).")
+  .option("-y, --yes", "Confirm --purge-vault without the extra warning.")
+  .action((opts: { user?: boolean; project?: boolean; purgeVault?: boolean; yes?: boolean }) => {
+    const v = vault();
+
+    // 1) hooks — both scopes by default; --user / --project narrows it.
+    const scopes: boolean[] = opts.user ? [true] : opts.project ? [false] : [false, true];
+    const done: string[] = [];
+    for (const userScope of scopes) {
+      const { file, removed, existed } = uninstallHooksFrom(userScope);
+      if (existed && removed.length) done.push(`移除 hooks ← ${file}(${removed.length} 条)`);
+    }
+    if (done.length === 0) console.log("未发现已安装的 docky hooks。");
+    else {
+      ok("已卸载 docky 集成:");
+      done.forEach((l) => console.log(`  ✓ ${l}`));
+    }
+
+    // 2) vault — never deleted implicitly; --purge-vault + confirmation only.
+    if (opts.purgeVault) {
+      if (!opts.yes) {
+        console.log(
+          `\n\x1b[33m⚠ --purge-vault 将永久删除 ${v} 及其中所有文档,不可恢复。确认请加 --yes。\x1b[0m`
+        );
+      } else if (fs.existsSync(v)) {
+        fs.rmSync(v, { recursive: true, force: true });
+        ok(`已删除 vault → ${v}`);
+      } else {
+        console.log(`vault 不存在:${v}`);
+      }
+    }
+
+    // 3) steps docky cannot perform itself.
+    console.log("\n还需手动完成(docky 无法代劳):");
+    console.log("  claude mcp remove docky                       # 断开 Claude Code 的 MCP 连接");
+    console.log("  npm rm -g docky   (或 npm unlink -g docky)    # 从 PATH 移除 docky / docky-mcp");
+    console.log("  docky unlink -p <项目>                        # 若曾用 docky link 建过 symlink");
+    if (!opts.purgeVault) {
+      console.log(`  rm -rf ${v}    # 如需连同全部文档一并删除(或 docky uninstall --purge-vault --yes)`);
+    }
   });
 
 program
@@ -968,6 +1035,24 @@ hooks
     } else {
       ok(`已写入 docky hooks → ${file}`);
       added.forEach((a) => console.log(`  + ${a}`));
+    }
+  });
+
+hooks
+  .command("uninstall")
+  .description("Remove docky hooks from Claude Code settings (project by default).")
+  .option("--user", "Remove from ~/.claude/settings.json instead of ./.claude/settings.json.")
+  .action((opts: { user?: boolean }) => {
+    const { file, removed, existed } = uninstallHooksFrom(Boolean(opts.user));
+    if (!existed) {
+      console.log(`未找到 settings.json:${file}(无需卸载)`);
+      return;
+    }
+    if (removed.length === 0) {
+      ok(`未发现 docky hooks,无需改动:${file}`);
+    } else {
+      ok(`已移除 docky hooks ← ${file}`);
+      removed.forEach((r) => console.log(`  - ${r}`));
     }
   });
 

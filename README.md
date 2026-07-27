@@ -123,6 +123,18 @@ It installs two idempotent hooks:
 
 > Hooks can only block/allow/inject — they can't force a tool call. "Read from the vault first" is driven by the injected context + your `CLAUDE.md`; the write side is enforced by the `PreToolUse` guard.
 
+## Uninstall
+
+`docky uninstall` reverses `setup` — it strips docky's hooks back out of Claude Code and prints the steps it can't do for you:
+
+```bash
+docky uninstall              # remove hooks from ./.claude and ~/.claude, keep the vault
+docky hooks uninstall        # just the project-level hooks (mirror of `hooks install`)
+docky uninstall --purge-vault --yes   # ALSO delete the vault and every doc in it (irreversible)
+```
+
+Hook removal is surgical: only docky's own entries are pulled, unrelated hooks in the same `settings.json` are left untouched, and now-empty blocks are pruned. **Your vault is never deleted implicitly** — `--purge-vault` requires an explicit `--yes`. docky can't run these for you, so `uninstall` prints them: `claude mcp remove docky` (disconnect the MCP server), `npm rm -g docky` (drop it from your PATH), and `docky unlink -p <project>` for any repo symlinks.
+
 ## Concepts
 
 - **Vault** — an independent git repo (default `~/docky-vault`, override with `$DOCKY_VAULT`), laid out as `projects/<name>/<type>/`, with an auto-generated `INDEX.md` per project.
@@ -135,13 +147,13 @@ It installs two idempotent hooks:
 
 A selection (run `docky --help` for the full list):
 
-**Setup & projects** — `setup`, `init`, `register`, `projects`, `whoami`
+**Setup & projects** — `setup`, `uninstall`, `init`, `register`, `projects`, `whoami`
 **Create & archive** — `new <type>`, `add <type> <files…>`, `import [dir]`
 **Find & read** — `list [type]`, `search <query>`, `open <rel>`, `links <rel>`, `recent`, `pin`/`unpin`, `save`/`folders`/`open-folder`
 **Lifecycle & quality** — `status <rel> <state>`, `doctor`, `stats`, `graph`, `index`
 **Versioning & safety** — `sync`, `log <rel>`, `diff <rel>`, `rm`, `undo`, `trash`, `restore`, `mv`
 **Scope & sharing** — `grant`/`revoke`/`grants`, `export`, `share <rel>`, `link`/`unlink`, `config`
-**Agent** — `inbox`, `review`, `hooks install`
+**Agent** — `inbox`, `review`, `hooks install`, `hooks uninstall`
 **Interactive** — `ui` (or just `docky`)
 
 ## Development

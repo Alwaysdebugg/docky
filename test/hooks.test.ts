@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import * as core from "../src/core.js";
-import { DOCKY_HOOK_ENTRIES, contextText, guardDecision, mergeHooks } from "../src/hooks.js";
+import { DOCKY_HOOK_ENTRIES, contextText, guardDecision, mergeHooks, unmergeHooks } from "../src/hooks.js";
 
 let tmp: string;
 let vault: string;
@@ -52,6 +52,13 @@ describe("guardDecision", () => {
     expect(guardDecision(mk("/Users/x/code/app/skills/design.md"), vault)).not.toBeNull();
   });
 
+  it("allows Matt Pocock agent config under docs/agents/**", () => {
+    expect(guardDecision(mk("/Users/x/code/app/docs/agents/issue-tracker.md"), vault)).toBeNull();
+    expect(guardDecision(mk("/Users/x/code/app/docs/agents/triage-labels.md"), vault)).toBeNull();
+    // a docs dir without the agents child is still guarded
+    expect(guardDecision(mk("/Users/x/code/app/docs/design-notes.md"), vault)).not.toBeNull();
+  });
+
   it("allows when input has no path / is unparseable", () => {
     expect(guardDecision("", vault)).toBeNull();
     expect(guardDecision("not json", vault)).toBeNull();
@@ -97,5 +104,53 @@ describe("mergeHooks", () => {
     const { settings } = mergeHooks(existing, DOCKY_HOOK_ENTRIES);
     expect(settings.hooks.Stop[0].hooks[0].command).toBe("echo done");
     expect(settings.hooks.SessionStart).toBeDefined();
+  });
+});
+
+describe("unmergeHooks", () => {
+  it("removes docky hooks and reports what was removed", () => {
+    const { settings } = mergeHooks({}, DOCKY_HOOK_ENTRIES);
+    const { settings: pruned, removed } = unmergeHooks(settings, DOCKY_HOOK_ENTRIES);
+    expect(removed.length).toBe(2);
+    // Both events pruned; the empty hooks map is dropped → leaves no scaffolding.
+    expect(pruned.hooks).toBeUndefined();
+  });
+
+  it("is a clean inverse of mergeHooks (install → uninstall → {})", () => {
+    const { settings } = mergeHooks({}, DOCKY_HOOK_ENTRIES);
+    const { settings: pruned } = unmergeHooks(settings, DOCKY_HOOK_ENTRIES);
+    expect(pruned).toEqual({});
+  });
+
+  it("is idempotent (second uninstall removes nothing)", () => {
+    const { settings } = mergeHooks({}, DOCKY_HOOK_ENTRIES);
+    unmergeHooks(settings, DOCKY_HOOK_ENTRIES);
+    const { removed } = unmergeHooks(settings, DOCKY_HOOK_ENTRIES);
+    expect(removed.length).toBe(0);
+  });
+
+  it("no-ops on settings that never had docky hooks", () => {
+    const existing = { hooks: { Stop: [{ hooks: [{ type: "command", command: "echo done" }] }] } };
+    const { settings, removed } = unmergeHooks(existing, DOCKY_HOOK_ENTRIES);
+    expect(removed.length).toBe(0);
+    expect(settings.hooks.Stop[0].hooks[0].command).toBe("echo done");
+  });
+
+  it("preserves unrelated hooks while removing only docky's", () => {
+    // A user-authored PreToolUse hook shares the event with docky's guard.
+    const existing = {
+      hooks: {
+        PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "my-linter" }] }],
+        Stop: [{ hooks: [{ type: "command", command: "echo done" }] }],
+      },
+    };
+    const merged = mergeHooks(existing, DOCKY_HOOK_ENTRIES).settings;
+    const { settings, removed } = unmergeHooks(merged, DOCKY_HOOK_ENTRIES);
+    expect(removed.length).toBe(2);
+    // docky's guard gone, the user's Bash linter and Stop hook remain.
+    expect(settings.hooks.PreToolUse).toHaveLength(1);
+    expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe("my-linter");
+    expect(settings.hooks.Stop[0].hooks[0].command).toBe("echo done");
+    expect(settings.hooks.SessionStart).toBeUndefined();
   });
 });
