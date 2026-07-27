@@ -11,7 +11,7 @@
 
 **A centralized home for the Markdown your AI agents generate — organized by project & type, decoupled from each repo's git, and served to agents with hard per-project scope isolation.**
 
-![tests](https://img.shields.io/badge/tests-114%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-113%20passing-brightgreen)
 ![node](https://img.shields.io/badge/node-%E2%89%A518-339933?logo=node.js&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178c6?logo=typescript&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-server-7c3aed)
@@ -156,7 +156,7 @@ Run `docky --help` for the full list.
 ```bash
 npm install
 npm run build      # tsc -> dist/
-npm test           # vitest (114 tests)
+npm test           # vitest (113 tests)
 npm run dev -- list    # run the CLI from source via tsx
 npm run mcp            # run the MCP server from source via tsx
 ```
