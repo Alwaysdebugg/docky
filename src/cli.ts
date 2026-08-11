@@ -8,7 +8,10 @@ import { listProjects } from "./core.js";
 import { getConfigValue, getVaultPath, isInitialized, listConfig, setConfigValue } from "./config.js";
 import { pageRaw, renderMarkdown } from "./pager.js";
 import { DOCKY_HOOK_ENTRIES, contextText, guardDecision, mergeHooks, unmergeHooks } from "./hooks.js";
-import { DOC_TYPES, DockyError } from "./types.js";
+import { DOC_TYPES, DockyError, docTypeCatalog } from "./types.js";
+
+/** The doc taxonomy + its review policy, appended to type-taking commands' help. */
+const TYPES_HELP = `\n文档类型与审查强度:\n${docTypeCatalog("  ").join("\n")}\n`;
 
 function readStdin(): Promise<string> {
   return new Promise((resolve) => {
@@ -236,6 +239,7 @@ program
 program
   .command("add <type> <files...>")
   .description(`Archive Markdown file(s) into <project>/<type>/. Types: ${DOC_TYPES.join(", ")}`)
+  .addHelpText("after", TYPES_HELP)
   .option("-p, --project <name>", "Target project (auto-inferred if omitted).")
   .option("--name <name>", "Rename on archive (single file only).")
   .option("-f, --frontmatter", "Prepend metadata frontmatter.")
@@ -269,6 +273,7 @@ program
 program
   .command("new <type> [name]")
   .description(`Create a new document from its type template (status: draft). Types: ${DOC_TYPES.join(", ")}`)
+  .addHelpText("after", TYPES_HELP)
   .option("-p, --project <name>", "Target project (auto-inferred if omitted).")
   .action((type: string, name: string | undefined, opts: { project?: string }) => {
     const v = vault();
@@ -326,7 +331,7 @@ program
 
 program
   .command("open <rel>")
-  .description("View a document, rendered, through your pager (path relative to project, e.g. design/foo.md).")
+  .description("View a document, rendered, through your pager (path relative to project, e.g. spec/foo.md).")
   .option("-p, --project <name>")
   .option("--raw", "Print raw Markdown instead of rendering/paging.")
   .option("--width <n>", "Render width with reflow.")
@@ -443,6 +448,46 @@ program
       ok(`已迁移 ${proj} → ${r.bucket}/(${r.moved.length} 项: ${r.moved.join(", ")})`);
     }
   });
+
+program
+  .command("migrate-types")
+  .description("Relocate docs filed under a retired doc type (design→plan; debug/code-review/prompts→_legacy/). Dry-run unless --apply.")
+  .option("-p, --project <name>", "Only this project (default: every project in the vault; templates are left alone).")
+  .option("--apply", "Actually move the files (default: print the plan and touch nothing).")
+  .action((opts: { project?: string; apply?: boolean }) => {
+    const v = vault();
+    requireInit(v);
+    const r = guard(() => core.migrateTypes(v, { project: opts.project, apply: Boolean(opts.apply) }));
+
+    if (r.moves.length === 0 && r.conflicts.length === 0 && r.pruned.length === 0 && r.templates.length === 0) {
+      ok("没有需要迁移的旧类型文档。");
+      return;
+    }
+    const byScope = new Map<string, core.TypeMove[]>();
+    for (const m of r.moves) byScope.set(m.scope, [...(byScope.get(m.scope) ?? []), m]);
+    for (const [scope, list] of byScope) {
+      console.log(`\x1b[36m${scope}\x1b[0m`);
+      for (const m of list) console.log(`  ${m.from}  →  ${m.to}`);
+    }
+    if (r.conflicts.length) {
+      console.log(`\n\x1b[33m跳过(目标已存在,不覆盖):\x1b[0m`);
+      for (const c of r.conflicts) console.log(`  ${c.scope}/${c.from}  ✗  ${c.to}`);
+    }
+    if (r.pruned.length) console.log(`\n清理空目录: ${r.pruned.length} 个`);
+    if (r.templates.length) {
+      console.log(`\n\x1b[2m陈旧模板(docky 自己种下的,删掉即回落到内置模板):\x1b[0m`);
+      for (const t of r.templates) console.log(`  templates/${t}`);
+    }
+
+    const tail = `${r.moves.length} 篇待迁移${r.conflicts.length ? `,${r.conflicts.length} 篇冲突跳过` : ""}`;
+    if (r.applied) ok(`\n已迁移 ${r.moves.length} 篇${r.conflicts.length ? `(${r.conflicts.length} 篇冲突跳过)` : ""}。`);
+    else console.log(`\n\x1b[2m(dry-run)\x1b[0m ${tail} —— 确认无误后加 --apply 执行。`);
+  })
+  .addHelpText(
+    "after",
+    "\n_legacy/ 位于项目(或分支桶)目录下、所有类型目录之外:文件与 git 历史保留,但 docky 的 list/search/get_context 不再索引它们。\n" +
+      "\ntemplates/ 是纯 opt-in 覆盖层,docky 不再往里写东西。早期版本在 init 时种过一批模板,其中 plan.md 会一直遮住更新后的内置模板 —— 本命令会删掉这些逐字节未改动的种子文件;你改过的模板一律不动。\n"
+  );
 
 program
   .command("sync")

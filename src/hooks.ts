@@ -10,6 +10,7 @@
  */
 import path from "node:path";
 import * as core from "./core.js";
+import { DOC_TYPE_HINT, docTypeCatalog } from "./types.js";
 
 // Common repo docs that are NOT process docs — never block these.
 const WHITELIST = /^(README|CHANGELOG|CONTRIBUTING|LICENSE|AGENTS|CLAUDE)/;
@@ -48,7 +49,7 @@ export function guardDecision(stdinJson: string, vault: string): string | null {
 
   const reason =
     `过程文档请用 docky 管理:调用 docky 的 write_doc(project, type, name, content) ` +
-    `写入中心仓库,而不是在项目里创建 ${p}。类型: design / plan / debug / code-review / prompts。`;
+    `写入中心仓库,而不是在项目里创建 ${p}。类型: ${DOC_TYPE_HINT}。`;
   return JSON.stringify({
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
@@ -62,9 +63,12 @@ export function guardDecision(stdinJson: string, vault: string): string | null {
 export function contextText(vault: string, cwd: string, initialized: boolean): string {
   const lines = [
     "## docky 文档政策",
-    "过程文档(design / plan / debug / code-review / prompts)统一由 docky 管理。" +
+    `过程文档(${DOC_TYPE_HINT})统一由 docky 管理。` +
       "需要读或写这类文档时,优先用 docky MCP:先 resolve_project,再 list_docs / search_docs / read_doc;写用 write_doc。" +
       "不要在仓库里直接新建或读取散落的 .md。",
+    "",
+    "### 文档类型与审查强度",
+    ...docTypeCatalog(),
   ];
   if (initialized) {
     try {

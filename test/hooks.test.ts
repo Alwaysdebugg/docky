@@ -36,7 +36,7 @@ describe("guardDecision", () => {
   });
 
   it("allows writes inside the vault", () => {
-    const inside = path.join(vault, "projects", "app", "design", "x.md");
+    const inside = path.join(vault, "projects", "app", "spec", "x.md");
     expect(guardDecision(mk(inside), vault)).toBeNull();
   });
 
@@ -77,10 +77,10 @@ describe("contextText", () => {
     const repo = path.join(tmp, "app");
     fs.mkdirSync(repo);
     core.registerProject(vault, "app", repo);
-    core.writeDoc(vault, "app", "design", "arch", "# Arch");
+    core.writeDoc(vault, "app", "spec", "arch", "# Arch");
     const t = contextText(vault, repo, true);
     expect(t).toContain("当前项目: app");
-    expect(t).toContain("design/arch.md");
+    expect(t).toContain("spec/arch.md");
   });
 });
 

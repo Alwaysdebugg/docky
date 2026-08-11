@@ -13,6 +13,7 @@ import {
   ProjectContext,
   ScopeDetection,
   SearchHit,
+  docTypeWeight,
 } from "./types.js";
 import {
   configPath,
@@ -21,7 +22,7 @@ import {
   loadConfig,
   saveConfig,
 } from "./config.js";
-import { loadTemplate, renderTemplate, writeDefaultTemplates } from "./templates.js";
+import { loadTemplate, renderTemplate, staleSeededTemplates } from "./templates.js";
 import { fuzzyScore } from "./match.js";
 
 // --------------------------------------------------------------------------- //
@@ -115,11 +116,12 @@ export function initVault(vault: string, useGit = true): string {
     fs.writeFileSync(
       readme,
       `# docky-vault\n\nCentralized store for AI-agent-generated Markdown docs, managed by ` +
-        `\`docky\` and organized as \`projects/<name>/<type>/\`.\n\nTypes: ${DOC_TYPES.join(", ")}\n`,
+        `\`docky\` and organized as \`projects/<name>/<type>/\`.\n\nTypes: ${DOC_TYPES.join(", ")}\n\n` +
+        `Scaffolding uses each type's built-in template. To override one, drop ` +
+        `\`templates/<type>.md\` here — docky never writes that directory itself (F06).\n`,
       "utf-8"
     );
   }
-  writeDefaultTemplates(vault); // F06: seed per-type scaffolding templates
   if (useGit && !fs.existsSync(path.join(vault, ".git"))) {
     git(vault, ["init", "-q"]);
   }
@@ -262,7 +264,7 @@ export function branchScopeEnabled(vault: string): boolean {
 
 /** Reduce a branch name to one safe path segment (slashes & odd chars → '-').
  *  A segment that would collide with a doc-type dir (e.g. a branch literally
- *  named "design") or the no-branch bucket is suffixed "-branch", so branch
+ *  named "plan") or the no-branch bucket is suffixed "-branch", so branch
  *  buckets and type dirs never share a name at the projects/<name>/ level. */
 export function branchSegment(branch: string | null | undefined): string {
   const seg = (branch ?? "")
@@ -347,6 +349,165 @@ export function migrateBranchScope(
   }
   if (moved.length) autoCommitVault(vault, `migrate branch-scope: ${project} → ${seg} (${moved.length})`);
   return { scope: `${project}/${seg}`, bucket: seg, moved };
+}
+
+// --------------------------------------------------------------------------- //
+// Taxonomy migration — relocate docs filed under a retired doc type.
+// --------------------------------------------------------------------------- //
+
+/** Directory legacy docs are parked in: inside a project/branch scope but
+ *  outside every type dir, so list/search/get_context never surface it. */
+export const LEGACY_PARK_DIR = "_legacy";
+
+/**
+ * Where each retired type's docs go. `design` merges into `plan` (they became
+ * one type). `debug` / `code-review` / `prompts` have no home in the taxonomy,
+ * so they are parked under `_legacy/<type>/`: files and git history are kept and
+ * still greppable, but docky stops indexing them.
+ */
+export const LEGACY_TYPE_MOVES: Record<string, string> = {
+  design: "plan",
+  debug: `${LEGACY_PARK_DIR}/debug`,
+  "code-review": `${LEGACY_PARK_DIR}/code-review`,
+  prompts: `${LEGACY_PARK_DIR}/prompts`,
+};
+
+export interface TypeMove {
+  scope: string; // "<project>" or "<project>/<branch-bucket>", relative to projects/
+  from: string; // e.g. "design/x.md", relative to the scope dir
+  to: string; // e.g. "plan/x.md"
+}
+
+export interface TypeMigrationResult {
+  applied: boolean; // false for a dry run (nothing touched on disk)
+  moves: TypeMove[];
+  conflicts: TypeMove[]; // destination already exists → skipped, never overwritten
+  pruned: string[]; // emptied legacy type dirs removed, e.g. "<scope>/prompts"
+  templates: string[]; // stale docky-seeded templates removed, e.g. "templates/plan.md"
+}
+
+/** Every dir name that is a doc bucket rather than a branch bucket. */
+function typeDirNames(): Set<string> {
+  return new Set<string>([...DOC_TYPES, ...Object.keys(LEGACY_TYPE_MOVES)]);
+}
+
+/**
+ * The scopes inside a project that can hold type dirs: the project dir itself
+ * (legacy flat layout) plus each branch bucket (F56 layout). Anything that is a
+ * type dir, the trash, or the legacy park is not a scope.
+ */
+function scopeDirsOf(vault: string, project: string): { scope: string; dir: string }[] {
+  const base = projectDir(vault, project);
+  if (!fs.existsSync(base) || !fs.statSync(base).isDirectory()) return [];
+  const out = [{ scope: project, dir: base }];
+  const skip = typeDirNames();
+  for (const e of fs.readdirSync(base, { withFileTypes: true })) {
+    if (!e.isDirectory()) continue;
+    if (skip.has(e.name) || e.name === LEGACY_PARK_DIR || e.name.startsWith(".")) continue;
+    out.push({ scope: `${project}/${e.name}`, dir: path.join(base, e.name) });
+  }
+  return out;
+}
+
+/**
+ * Move documents filed under a retired type into the current taxonomy
+ * (LEGACY_TYPE_MOVES), across both the flat and the branch-bucket layout, and
+ * drop any template docky itself seeded that the taxonomy has outgrown.
+ *
+ * Defaults to a DRY RUN: it reports the plan and touches nothing. Pass
+ * `apply: true` to perform it. A move whose destination already exists is
+ * reported as a conflict and skipped — this never overwrites a document.
+ * Idempotent: a second run has nothing left to do.
+ */
+export function migrateTypes(
+  vault: string,
+  opts: { project?: string; apply?: boolean } = {}
+): TypeMigrationResult {
+  const root = path.join(vault, "projects");
+  let projects: string[];
+  if (opts.project) {
+    // This command moves files, so a mistyped project name must not read as
+    // "nothing to migrate" — a project docky has never stored a doc for has no
+    // directory here, and neither does a typo.
+    if (!fs.existsSync(projectDir(vault, opts.project))) {
+      throw new DockyError(
+        `Project '${opts.project}' has no directory in the vault. ` +
+          `Run 'docky projects' to see the projects docky knows about.`
+      );
+    }
+    projects = [opts.project];
+  } else if (fs.existsSync(root)) {
+    projects = fs
+      .readdirSync(root, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && !e.name.startsWith("."))
+      .map((e) => e.name);
+  } else {
+    projects = [];
+  }
+
+  const moves: TypeMove[] = [];
+  const conflicts: TypeMove[] = [];
+  const pruned: string[] = [];
+
+  for (const project of projects) {
+    for (const { scope, dir } of scopeDirsOf(vault, project)) {
+      for (const [legacyType, destRel] of Object.entries(LEGACY_TYPE_MOVES)) {
+        const src = path.join(dir, legacyType);
+        if (!fs.existsSync(src) || !fs.statSync(src).isDirectory()) continue;
+        const destDir = path.join(dir, destRel);
+
+        // `left` counts what this scan does NOT relocate — a conflict, a
+        // non-Markdown file, a nested dir. One tally drives the prune decision
+        // in both modes, so a dry run cannot promise a cleanup apply won't do.
+        let left = 0;
+        for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+          if (!entry.isFile() || !/\.(md|markdown)$/i.test(entry.name)) {
+            left++;
+            continue;
+          }
+          const move: TypeMove = {
+            scope,
+            from: `${legacyType}/${entry.name}`,
+            to: `${destRel}/${entry.name}`,
+          };
+          if (fs.existsSync(path.join(destDir, entry.name))) {
+            conflicts.push(move); // occupied → leave both files alone
+            left++;
+            continue;
+          }
+          moves.push(move);
+          if (opts.apply) {
+            fs.mkdirSync(destDir, { recursive: true });
+            fs.renameSync(path.join(src, entry.name), path.join(destDir, entry.name));
+          }
+        }
+
+        // Drop the legacy dir once it is empty (an untouched conflict keeps it).
+        if (left === 0) {
+          pruned.push(`${scope}/${legacyType}`);
+          if (opts.apply) {
+            try {
+              fs.rmdirSync(src);
+            } catch {
+              /* best-effort cleanup */
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Templates are vault-wide, so this runs once — never per project, and not at
+  // all when the caller scoped the migration to one.
+  const templates = opts.project ? [] : staleSeededTemplates(vault);
+  if (opts.apply) {
+    for (const t of templates) fs.rmSync(path.join(vault, "templates", t), { force: true });
+  }
+
+  if (opts.apply && (moves.length > 0 || pruned.length > 0 || templates.length > 0)) {
+    autoCommitVault(vault, `migrate types: ${moves.length} doc(s) relocated`);
+  }
+  return { applied: Boolean(opts.apply), moves, conflicts, pruned, templates };
 }
 
 // --------------------------------------------------------------------------- //
@@ -739,7 +900,7 @@ export function searchDocs(
 // --------------------------------------------------------------------------- //
 export interface Scope {
   project: string;
-  type?: string; // type-scoped grant (e.g. "platform:design")
+  type?: string; // type-scoped grant (e.g. "platform:spec")
   readonly: boolean; // true for granted cross-project scopes
 }
 
@@ -1104,9 +1265,10 @@ export function buildContext(
   }
 
   function metaScore(d: DocInfo): number {
-    let s = d.status === "active" ? 3 : d.status === "draft" ? 1 : 0;
-    if (d.type === "design" || d.type === "plan") s += 1;
-    return s;
+    const s = d.status === "active" ? 3 : d.status === "draft" ? 1 : 0;
+    // Durable, authoritative types (constitution / spec / adr) outrank throwaway
+    // ones (tasks); the weight is derived from the type's review level (types.ts).
+    return s + docTypeWeight(d.type);
   }
 
   const scored = docs.map((d) => {

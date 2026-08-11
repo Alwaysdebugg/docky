@@ -13,6 +13,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import * as core from "./core.js";
 import { getVaultPath } from "./config.js";
+import { DOC_TYPES, DOC_TYPE_HINT, DOC_TYPE_SPECS, REVIEW_HINT } from "./types.js";
 import { DockyError } from "./types.js";
 import {
   contextPromptMessages,
@@ -83,7 +84,7 @@ server.registerTool(
     inputSchema: {
       project: z.string(),
       branch: BRANCH_ARG,
-      type: z.string().optional().describe("design | plan | debug | code-review | prompts"),
+      type: z.string().optional().describe(DOC_TYPE_HINT),
       status: z.string().optional().describe("draft | active | done | archived"),
       tag: z.string().optional().describe("Filter to docs carrying this tag."),
     },
@@ -105,7 +106,7 @@ server.registerTool(
   "read_doc",
   {
     description:
-      "Read a single document by its project-relative path (e.g. design/x.md). " +
+      "Read a single document by its project-relative path (e.g. spec/x.md). " +
       "Paths that escape the project scope are refused.",
     inputSchema: { project: z.string(), branch: BRANCH_ARG, path: z.string() },
   },
@@ -172,7 +173,7 @@ server.registerTool(
     inputSchema: {
       project: z.string(),
       branch: BRANCH_ARG,
-      type: z.string(),
+      type: z.string().describe(`${DOC_TYPE_HINT}。各类型的审查强度:${REVIEW_HINT}`),
       name: z
         .string()
         .describe(
@@ -273,23 +274,18 @@ server.registerPrompt(
   ({ project, query }) => ({ messages: contextPromptMessages(vault(), project, query) })
 );
 
-server.registerPrompt(
-  "start-debug-doc",
-  {
-    description: "Start a new debug document from the docky template (F06).",
-    argsSchema: { project: z.string(), name: z.string() },
-  },
-  ({ project, name }) => ({ messages: scaffoldPromptMessages(vault(), "debug", project, name) })
-);
-
-server.registerPrompt(
-  "start-design-doc",
-  {
-    description: "Start a new design document from the docky template (F06).",
-    argsSchema: { project: z.string(), name: z.string() },
-  },
-  ({ project, name }) => ({ messages: scaffoldPromptMessages(vault(), "design", project, name) })
-);
+// One scaffold prompt per doc type, generated from the taxonomy so adding a type
+// never leaves a prompt behind. Each prompt carries the type's review policy.
+for (const t of DOC_TYPES) {
+  server.registerPrompt(
+    `start-${t}-doc`,
+    {
+      description: `Start a new ${t} document from the docky template (F06). ${DOC_TYPE_SPECS[t].purpose};审查:${DOC_TYPE_SPECS[t].policy}`,
+      argsSchema: { project: z.string(), name: z.string() },
+    },
+    ({ project, name }) => ({ messages: scaffoldPromptMessages(vault(), t, project, name) })
+  );
+}
 
 async function main(): Promise<void> {
   const transport = new StdioServerTransport();
