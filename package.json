@@ -14,7 +14,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/postbuild.mjs",
     "dev": "tsx src/cli.ts",
     "mcp": "tsx src/mcp.ts",
     "test": "vitest run",
