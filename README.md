@@ -11,7 +11,7 @@
 
 **A centralized home for the Markdown your AI agents generate — organized by project & type, decoupled from each repo's git, and served to agents with hard per-project scope isolation.**
 
-![tests](https://img.shields.io/badge/tests-124%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-136%20passing-brightgreen)
 ![node](https://img.shields.io/badge/node-%E2%89%A518-339933?logo=node.js&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178c6?logo=typescript&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-server-7c3aed)
@@ -31,7 +31,7 @@ When you build with AI coding agents, they produce a steady stream of process Ma
 - **scatter** — no single place to find or search history across projects;
 - **pollute agent context** — an agent reads unrelated docs, wasting tokens and getting misled.
 
-**docky** pulls these docs out of your repos into one **central vault** (its own git repo), filed as `projects/<name>/<type>/`. You browse and search from the command line; agents read and write through an MCP server that **confines every call to one project's scope** — so an agent can reuse a project's history without ever seeing another project's docs.
+**docky** pulls these docs out of your repos into one **central vault** (its own git repo), filed as `projects/<name>/branches/<branch>/<type>/`. You browse and search from the command line; agents read and write through an MCP server that confines every call to one project and Git branch.
 
 > docky is deliberately small: it does four things well — **search**, **agent context/memory**, **scope isolation**, and **MCP integration** — and stays out of your way.
 
@@ -44,7 +44,9 @@ When you build with AI coding agents, they produce a steady stream of process Ma
 - **Relevance search** — ranked full-text search with highlighted snippets, fuzzy matching, and cross-project (granted, read-only) search.
 - **One-shot agent context** — `get_context` returns a ranked, budget-bounded bundle of a project's most relevant docs.
 - **Governed cross-project access** — explicit, auditable, read-only grants on top of the default full isolation.
-- **Branch-scoped isolation** — optionally store docs per branch so an agent on branch A never reads branch B's docs.
+- **Branch-scoped isolation** — every project stores docs by Git branch, so an agent on branch A never reads branch B's docs.
+- **Named workspaces** — keep personal, work, and client vaults isolated, switch globally or select one command with `--workspace`.
+- **Cloud Storage & Sync** — opt-in per workspace; private Git remotes synchronize through commit → fetch → rebase → push, with offline-safe pending state and non-destructive conflict detection.
 - **Versioned** — the vault auto-commits on writes, so history is always recoverable from git.
 - **Smart (non-duplicating) agent writes** — `write_doc` won't silently overwrite or duplicate; it returns a suggestion instead.
 - **One-command Claude Code hooks** — inject the "process docs live in docky" policy and guard against stray in-repo writes.
@@ -158,24 +160,46 @@ docky uninstall --purge-vault --yes   # ALSO delete the vault and every doc in i
 
 Hook removal is surgical: only docky's own entries are pulled, unrelated hooks in the same `settings.json` are left untouched. **Your vault is never deleted implicitly** — `--purge-vault` requires an explicit `--yes`. docky can't run these for you, so `uninstall` prints them: `claude mcp remove docky` and `npm rm -g docky`.
 
+## Cloud Sync setup wizard
+
+Run the interactive wizard to configure one workspace without memorizing the individual cloud commands:
+
+```bash
+docky cloud setup
+# or configure a specific workspace directly
+docky --workspace work cloud setup
+```
+
+The wizard walks through workspace selection, vault initialization when needed, Git remote URL, branch, the Cloud Sync switch, a review screen, and an optional first sync. Existing values are offered as defaults when the wizard is run again. HTTPS credentials embedded in a remote URL are redacted from the review screen; Git or SSH remains responsible for authentication.
+
+The non-interactive commands remain available for scripts:
+
+```bash
+docky cloud connect git@github.com:you/docky-docs.git --branch main
+docky cloud on
+docky sync
+```
+
 ## Concepts
 
-- **Vault** — an independent git repo (default `~/docky-vault`, override with `$DOCKY_VAULT`), laid out as `projects/<name>/<type>/`.
+- **Vault** — an independent git repo (default `~/docky-vault`, override with `$DOCKY_VAULT`), laid out as `projects/<name>/branches/<branch>/<type>/`.
+- **Workspace** — a named vault registered in `~/.docky/workspaces.yaml`; each workspace keeps its own projects, history, remote, and Cloud Sync switch.
+- **Cloud Sync** — a local-first Git synchronization state machine. Turning it off performs no remote operations and never removes local or cloud data.
 - **Scope isolation** — the core guarantee. All file operations are confined to a single project directory; escaping paths are rejected (`safePath`).
 - **Auto-commit** — writes and deletes are committed to the vault automatically, so history is always recoverable from git.
-- **Branch scope** (opt-in) — with `branchScope` on, docs live at `projects/<name>/<branch>/<type>/`; run `docky migrate-branch-scope` once to move legacy docs.
+- **Branch scope** — always enabled. Registration creates the current branch; later branches are created lazily on first write. Slash-separated refs remain readable directory trees (`feat/login`). Run `docky migrate-branch-scope` once to move legacy flat docs.
 - **Git decoupling** — docs live only in the vault; your repos stay clean.
 
 ## Command reference
 
 Run `docky --help` for the full list.
 
-**Setup & projects** — `setup`, `uninstall`, `init`, `register`, `projects`, `whoami`
+**Setup & projects** — `setup`, `uninstall`, `init`, `workspace add/list/use`, `register`, `projects`, `whoami`
 **Create & archive** — `new <type> [name]`, `add <type> <files…>`
 **Find & read** — `list [type]`, `search <query>`, `open <rel>`
 **Lifecycle** — `status <rel> <state>`, `mv <rel> <type>`, `rm <rel>`
 **Scope & sharing** — `grant`/`revoke`/`grants`, `config`, `migrate-branch-scope`, `migrate-types`
-**Versioning** — `sync`
+**Versioning & cloud** — `cloud setup`, `cloud connect/on/off/status`, `sync`, `sync --all`
 **Agent** — `hooks install` / `hooks uninstall`
 
 ## Development
@@ -183,7 +207,7 @@ Run `docky --help` for the full list.
 ```bash
 npm install
 npm run build      # tsc -> dist/
-npm test           # vitest (124 tests)
+npm test           # vitest (136 tests)
 npm run dev -- list    # run the CLI from source via tsx
 npm run mcp            # run the MCP server from source via tsx
 ```

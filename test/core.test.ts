@@ -547,32 +547,28 @@ describe("agent date-stamped doc names (F20)", () => {
 });
 
 describe("branch-scoped isolation (F56)", () => {
-  function enableBranchScope(): void {
-    const cfg = loadConfig(vault);
-    cfg.branchScope = true;
-    saveConfig(vault, cfg);
+  function legacyDoc(type: string, name: string, body: string): void {
+    const dir = path.join(vault, "projects", "p", type);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, name), body);
   }
 
-  it("branchSegment sanitizes a branch into one safe path segment", () => {
-    expect(core.branchSegment("main")).toBe("main");
-    expect(core.branchSegment("feat/ultra-update")).toBe("feat-ultra-update");
-    expect(core.branchSegment("release/1.2.x")).toBe("release-1.2.x");
-    expect(core.branchSegment(null)).toBe(core.DEFAULT_BRANCH_BUCKET);
-    expect(core.branchSegment("   ")).toBe(core.DEFAULT_BRANCH_BUCKET);
-    // a branch named like a doc type is suffixed so it can't collide with a type dir
-    expect(core.branchSegment("spec")).toBe("spec-branch");
+  it("branchPath preserves readable Git branch hierarchy", () => {
+    expect(core.branchPath("main")).toBe("main");
+    expect(core.branchPath("feat/ultra-update")).toBe("feat/ultra-update");
+    expect(core.branchPath("release/1.2.x")).toBe("release/1.2.x");
+    expect(core.branchPath(null)).toBe(core.DEFAULT_BRANCH_BUCKET);
+    expect(core.branchPath("   ")).toBe(core.DEFAULT_BRANCH_BUCKET);
+    expect(core.branchPath("../unsafe")).not.toContain("..");
   });
 
-  it("scopedProject is the identity when off, a branch bucket when on", () => {
-    expect(core.scopedProject(vault, "p", "main")).toBe("p"); // off by default
-    enableBranchScope();
-    expect(core.scopedProject(vault, "p", "main")).toBe("p/main");
-    expect(core.scopedProject(vault, "p", "feat/x")).toBe("p/feat-x");
-    expect(core.scopedProject(vault, "p", null)).toBe(`p/${core.DEFAULT_BRANCH_BUCKET}`);
+  it("always places the branch below the branches namespace", () => {
+    expect(core.scopedProject(vault, "p", "main")).toBe("p/branches/main");
+    expect(core.scopedProject(vault, "p", "feat/x")).toBe("p/branches/feat/x");
+    expect(core.scopedProject(vault, "p", null)).toBe(`p/branches/${core.DEFAULT_BRANCH_BUCKET}`);
   });
 
   it("an agent on branch A never reads branch B's docs", () => {
-    enableBranchScope();
     const a = core.scopedProject(vault, "p", "branch-a");
     const b = core.scopedProject(vault, "p", "branch-b");
     core.writeDoc(vault, a, "spec", "secret-a", "# A\nonly on A");
@@ -584,12 +580,11 @@ describe("branch-scoped isolation (F56)", () => {
     expect(() => core.readDoc(vault, b, "spec/secret-a.md")).toThrow(/not found/i);
     // and they live in physically separate directories
     const base = path.join(vault, "projects", "p");
-    expect(fs.existsSync(path.join(base, "branch-a", "spec", "secret-a.md"))).toBe(true);
-    expect(fs.existsSync(path.join(base, "branch-b", "spec", "secret-a.md"))).toBe(false);
+    expect(fs.existsSync(path.join(base, "branches", "branch-a", "spec", "secret-a.md"))).toBe(true);
+    expect(fs.existsSync(path.join(base, "branches", "branch-b", "spec", "secret-a.md"))).toBe(false);
   });
 
   it("smartWrite dedupe, search, and buildContext stay within the branch bucket", () => {
-    enableBranchScope();
     const a = core.scopedProject(vault, "p", "branch-a");
     const b = core.scopedProject(vault, "p", "branch-b");
     core.smartWrite(vault, a, "tasks", "issue", "# 登录排查\nsession 丢失导致登录失败");
@@ -602,17 +597,15 @@ describe("branch-scoped isolation (F56)", () => {
   });
 
   it("migrate moves legacy docs into the branch bucket, idempotently", () => {
-    // legacy docs written before enabling branchScope (bare projects/<name>/<type>/)
-    core.writeDoc(vault, "p", "spec", "legacy", "# Legacy\nbody");
-    core.writeDoc(vault, "p", "plan", "roadmap", "# Roadmap");
-    enableBranchScope();
+    legacyDoc("spec", "legacy.md", "# Legacy\nbody");
+    legacyDoc("plan", "roadmap.md", "# Roadmap");
     // before migration the branch scope is empty (legacy docs are invisible)
     expect(core.listDocs(vault, core.scopedProject(vault, "p", "main")).length).toBe(0);
 
     const r = core.migrateBranchScope(vault, "p", "main");
     expect(r.bucket).toBe("main");
     expect(r.moved.sort()).toEqual(["plan", "spec"]);
-    expect(core.listDocs(vault, "p/main").map((d) => d.rel).sort()).toEqual([
+    expect(core.listDocs(vault, "p/branches/main").map((d) => d.rel).sort()).toEqual([
       "plan/roadmap.md",
       "spec/legacy.md",
     ]);
@@ -623,13 +616,32 @@ describe("branch-scoped isolation (F56)", () => {
   });
 
   it("migrate never swallows an already-migrated branch bucket", () => {
-    core.writeDoc(vault, "p", "spec", "x", "# X");
-    enableBranchScope();
-    core.migrateBranchScope(vault, "p", "main"); // → projects/p/main/spec/x.md
+    legacyDoc("spec", "x.md", "# X");
+    core.migrateBranchScope(vault, "p", "main");
     // migrating a different branch must not move the existing 'main' bucket
     const r = core.migrateBranchScope(vault, "p", "feature");
     expect(r.moved).toEqual([]);
-    expect(fs.existsSync(path.join(vault, "projects", "p", "main", "spec", "x.md"))).toBe(true);
+    expect(fs.existsSync(path.join(vault, "projects", "p", "branches", "main", "spec", "x.md"))).toBe(true);
+  });
+
+  it("upgrades the previous flattened branch-bucket layout", () => {
+    const old = path.join(vault, "projects", "p", "feat-x", "spec");
+    fs.mkdirSync(old, { recursive: true });
+    fs.writeFileSync(path.join(old, "old.md"), "# Old");
+
+    const r = core.migrateBranchScope(vault, "p", "feat/x");
+    expect(r.moved).toContain("feat-x/spec");
+    expect(fs.existsSync(path.join(vault, "projects", "p", "branches", "feat", "x", "spec", "old.md"))).toBe(true);
+    expect(fs.existsSync(path.join(vault, "projects", "p", "feat-x"))).toBe(false);
+  });
+
+  it("register creates only the current branch categories", () => {
+    const repo = mkRepo(path.join(tmp, "registered"), "feat/readable-tree");
+    core.registerProject(vault, "registered", repo);
+    const base = path.join(vault, "projects", "registered");
+    expect(fs.readdirSync(base)).toEqual(["branches"]);
+    expect(fs.existsSync(path.join(base, "branches", "feat", "readable-tree", "spec"))).toBe(true);
+    expect(fs.existsSync(path.join(base, "spec"))).toBe(false);
   });
 });
 
@@ -649,7 +661,7 @@ describe("retired-type migration (migrate-types)", () => {
     legacyDoc("p", "debug", "login.md", "# 排查\nsession 丢失");
     legacyDoc("p", "code-review", "pr-12.md");
     fs.mkdirSync(path.join(vault, "projects", "p", "prompts"), { recursive: true }); // empty
-    legacyDoc("p/feat-x", "design", "branch-doc.md"); // branch-bucket layout (F56)
+    legacyDoc("p/branches/feat/x", "design", "branch-doc.md");
   });
 
   it("dry-runs by default: reports the plan and touches nothing", () => {
@@ -659,7 +671,7 @@ describe("retired-type migration (migrate-types)", () => {
     expect(r.moves).toContainEqual({ scope: "p", from: "debug/login.md", to: "_legacy/debug/login.md" });
     expect(r.moves).toContainEqual({ scope: "p", from: "code-review/pr-12.md", to: "_legacy/code-review/pr-12.md" });
     // the branch bucket is migrated in its own scope, not the project root
-    expect(r.moves).toContainEqual({ scope: "p/feat-x", from: "design/branch-doc.md", to: "plan/branch-doc.md" });
+    expect(r.moves).toContainEqual({ scope: "p/branches/feat/x", from: "design/branch-doc.md", to: "plan/branch-doc.md" });
     expect(r.pruned).toContain("p/prompts"); // already-empty legacy dir
     // nothing moved on disk
     expect(fs.existsSync(path.join(vault, "projects", "p", "design", "arch.md"))).toBe(true);
@@ -668,6 +680,7 @@ describe("retired-type migration (migrate-types)", () => {
 
   it("apply merges design into plan and parks homeless types outside the index", () => {
     core.migrateTypes(vault, { apply: true });
+    core.migrateBranchScope(vault, "p", null);
 
     // design → plan: visible to docky again, under its new type
     const docs = core.listDocs(vault, "p");
@@ -675,8 +688,9 @@ describe("retired-type migration (migrate-types)", () => {
     expect(core.readDoc(vault, "p", "plan/arch.md")).toContain("设计正文");
 
     // debug / code-review: preserved on disk, but no longer indexed anywhere
-    expect(fs.existsSync(path.join(vault, "projects", "p", "_legacy", "debug", "login.md"))).toBe(true);
-    expect(fs.existsSync(path.join(vault, "projects", "p", "_legacy", "code-review", "pr-12.md"))).toBe(true);
+    const current = path.join(vault, "projects", "p", "branches", core.DEFAULT_BRANCH_BUCKET);
+    expect(fs.existsSync(path.join(current, "_legacy", "debug", "login.md"))).toBe(true);
+    expect(fs.existsSync(path.join(current, "_legacy", "code-review", "pr-12.md"))).toBe(true);
     expect(core.searchDocs(vault, "p", "session")).toHaveLength(0);
     // the parked docs never enter an agent's context bundle either
     expect(core.buildContext(vault, "p", { query: "session" }).items.map((i) => i.rel)).toEqual(["plan/arch.md"]);
@@ -686,16 +700,16 @@ describe("retired-type migration (migrate-types)", () => {
       expect(fs.existsSync(path.join(vault, "projects", "p", t))).toBe(false);
     }
     // and the branch bucket got the same treatment
-    expect(fs.existsSync(path.join(vault, "projects", "p", "feat-x", "plan", "branch-doc.md"))).toBe(true);
+    expect(fs.existsSync(path.join(vault, "projects", "p", "branches", "feat", "x", "plan", "branch-doc.md"))).toBe(true);
   });
 
   it("never overwrites: a taken destination is reported as a conflict and skipped", () => {
-    core.writeDoc(vault, "p", "plan", "arch", "# 已存在的 plan\nKEEP ME");
+    legacyDoc("p", "plan", "arch.md", "# 已存在的 plan\nKEEP ME");
     const r = core.migrateTypes(vault, { apply: true });
 
     expect(r.conflicts).toContainEqual({ scope: "p", from: "design/arch.md", to: "plan/arch.md" });
     expect(r.moves).not.toContainEqual({ scope: "p", from: "design/arch.md", to: "plan/arch.md" });
-    expect(core.readDoc(vault, "p", "plan/arch.md")).toContain("KEEP ME"); // destination intact
+    expect(fs.readFileSync(path.join(vault, "projects", "p", "plan", "arch.md"), "utf-8")).toContain("KEEP ME");
     expect(fs.readFileSync(path.join(vault, "projects", "p", "design", "arch.md"), "utf-8")).toContain("设计正文"); // source intact
     expect(fs.existsSync(path.join(vault, "projects", "p", "design"))).toBe(true); // not pruned while occupied
   });

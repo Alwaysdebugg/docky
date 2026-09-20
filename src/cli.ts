@@ -2,13 +2,17 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createInterface } from "node:readline/promises";
 import { Command } from "commander";
+import { runCloudSetupWizard } from "./cloud-setup.js";
 import * as core from "./core.js";
 import { listProjects } from "./core.js";
 import { getConfigValue, getVaultPath, isInitialized, listConfig, setConfigValue } from "./config.js";
 import { pageRaw, renderMarkdown } from "./pager.js";
 import { DOCKY_HOOK_ENTRIES, contextText, guardDecision, mergeHooks, unmergeHooks } from "./hooks.js";
+import { configureSync, getSyncStatus, syncWorkspace, SyncResult } from "./sync.js";
 import { DOC_TYPES, DockyError, docTypeCatalog } from "./types.js";
+import { listWorkspaces, registerWorkspace, setActiveWorkspace } from "./workspaces.js";
 
 /** The doc taxonomy + its review policy, appended to type-taking commands' help. */
 const TYPES_HELP = `\n文档类型与审查强度:\n${docTypeCatalog("  ").join("\n")}\n`;
@@ -31,7 +35,12 @@ const program = new Command();
 program.enablePositionalOptions();
 
 function vault(): string {
-  return getVaultPath();
+  try {
+    return getVaultPath(program.opts<{ workspace?: string }>().workspace);
+  } catch (e) {
+    if (e instanceof DockyError) fail(e.message);
+    throw e;
+  }
 }
 
 function fail(msg: string): never {
@@ -59,12 +68,7 @@ function resolveBare(v: string, project?: string): string {
   }
 }
 
-/**
- * Branch-scoped project key for filesystem ops (F56). When branchScope is on it
- * returns "<project>/<branch>" (branch from cwd's git); otherwise the bare name,
- * so every command that uses this is unchanged when the flag is off. Config /
- * cross-project commands (grant/revoke/search --across) use resolveBare instead.
- */
+/** Current branch's document scope. Config and grants use the bare project. */
 function resolve(v: string, project?: string): string {
   return core.scopedProject(v, resolveBare(v, project), core.gitBranch(process.cwd()));
 }
@@ -80,6 +84,28 @@ function guard<T>(fn: () => T): T {
     if (e instanceof DockyError) fail(e.message);
     throw e;
   }
+}
+
+function printSyncResult(label: string, result: SyncResult): void {
+  const s = result.status;
+  if (s.state === "off") {
+    console.log(`${label}: Cloud Sync is off.`);
+    return;
+  }
+  if (s.state === "conflict") {
+    console.log(`\x1b[33m${label}: sync paused — conflicts: ${s.conflicts.join(", ")}\x1b[0m`);
+    return;
+  }
+  if (s.state === "error") {
+    console.log(`\x1b[31m${label}: ${s.lastError ?? "Cloud sync failed."}\x1b[0m`);
+    return;
+  }
+  const changes = [
+    result.committed ? "committed" : "",
+    result.pulled ? `pulled ${result.pulled}` : "",
+    result.pushed ? "pushed" : "",
+  ].filter(Boolean);
+  ok(`${label}: ${changes.length ? changes.join(" · ") : "already up to date"}`);
 }
 
 /** Merge docky hooks into the project- or user-level Claude Code settings. */
@@ -120,7 +146,8 @@ function uninstallHooksFrom(user: boolean): { file: string; removed: string[]; e
 program
   .name("docky")
   .description("Centralized Markdown doc manager with per-project scope isolation (CLI + MCP).")
-  .version("0.1.0");
+  .version("0.1.0")
+  .option("-w, --workspace <name>", "Use a named workspace for this command.");
 
 program
   .command("setup")
@@ -222,6 +249,38 @@ program
     const v = vault();
     core.initVault(v, opts.git);
     ok(`Initialized vault at ${v}`);
+  });
+
+const workspaceCommand = program
+  .command("workspace")
+  .alias("vault")
+  .description("Register, list, and select isolated Docky workspaces.");
+
+workspaceCommand
+  .command("add <name> <path>")
+  .description("Register a named workspace and initialize its vault when needed.")
+  .action((name: string, workspacePath: string) => {
+    const resolved = path.resolve(workspacePath);
+    if (!isInitialized(resolved)) core.initVault(resolved, true);
+    const entry = guard(() => registerWorkspace(name, resolved));
+    ok(`Workspace ${entry.name} → ${entry.path}`);
+  });
+
+workspaceCommand
+  .command("list")
+  .description("List named workspaces; '*' marks the active one.")
+  .action(() => {
+    for (const entry of listWorkspaces()) {
+      console.log(`${entry.active ? "*" : " "} ${entry.name.padEnd(16)} ${entry.path}`);
+    }
+  });
+
+workspaceCommand
+  .command("use <name>")
+  .description("Select the workspace used by new CLI and MCP processes.")
+  .action((name: string) => {
+    const entry = guard(() => setActiveWorkspace(name));
+    ok(`Active workspace: ${entry.name} (${entry.path})`);
   });
 
 program
@@ -430,15 +489,12 @@ program
 
 program
   .command("migrate-branch-scope")
-  .description("F56: move a project's legacy docs into a branch bucket projects/<name>/<branch>/.")
+  .description("Move legacy flat docs into projects/<name>/branches/<branch>/.")
   .option("-p, --project <name>")
   .option("-b, --branch <branch>", "Target branch bucket (default: current git branch).")
   .action((opts: { project?: string; branch?: string }) => {
     const v = vault();
     requireInit(v);
-    if (!core.branchScopeEnabled(v)) {
-      console.log("提示:branchScope 尚未开启 —— 先 `docky config set branchScope true` 再迁移。");
-    }
     const proj = resolveBare(v, opts.project);
     const branch = opts.branch ?? core.gitBranch(process.cwd());
     const r = guard(() => core.migrateBranchScope(v, proj, branch));
@@ -491,14 +547,117 @@ program
 
 program
   .command("sync")
-  .description("Commit the vault's pending changes; optionally push to a configured remote.")
-  .option("--push", "Push to the configured git remote after committing.")
-  .action((opts: { push?: boolean }) => {
+  .description("Sync the active cloud workspace, or only commit locally when Cloud Sync is off.")
+  .option("--push", "Legacy: push the current upstream when Cloud Sync is off.")
+  .option("--all", "Sync every registered workspace whose Cloud Sync switch is on.")
+  .action((opts: { push?: boolean; all?: boolean }) => {
+    if (opts.all) {
+      for (const workspace of listWorkspaces()) {
+        if (!isInitialized(workspace.path)) continue;
+        const status = getSyncStatus(workspace.path);
+        if (!status.enabled) continue;
+        printSyncResult(workspace.name, syncWorkspace(workspace.path));
+      }
+      return;
+    }
     const v = vault();
     requireInit(v);
+    if (getSyncStatus(v).enabled) {
+      printSyncResult(program.opts<{ workspace?: string }>().workspace ?? "workspace", syncWorkspace(v));
+      return;
+    }
     const r = core.syncVault(v, Boolean(opts.push));
     if (r.committed) ok(`Committed ${r.changes} change(s)${r.pushed ? " · pushed" : ""}`);
     else console.log("Nothing to commit.");
+  });
+
+const cloud = program.command("cloud").description("Configure per-workspace Cloud Storage & Sync.");
+
+cloud
+  .command("setup")
+  .alias("wizard")
+  .description("Configure Cloud Sync through an interactive step-by-step wizard.")
+  .action(async () => {
+    if (!process.stdin.isTTY || !process.stdout.isTTY) {
+      fail(
+        "cloud setup requires an interactive terminal. For scripts, use `docky cloud connect`, `docky cloud on`, and `docky sync`."
+      );
+    }
+    const terminal = createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      const result = await runCloudSetupWizard(
+        {
+          question: (prompt) => terminal.question(prompt),
+          print: (message = "") => console.log(message),
+        },
+        { workspace: program.opts<{ workspace?: string }>().workspace }
+      );
+
+      if (result.cancelled) {
+        const initialized = result.initialized ? "Vault 已初始化；" : "";
+        console.log(`\nCloud Sync 配置已取消。${initialized}现有文档与配置未被删除。`);
+        return;
+      }
+
+      const label = result.workspace?.name ?? "workspace";
+      ok(`\n${label}: Cloud Sync ${result.status?.enabled ? "ON" : "OFF"} · 配置已保存`);
+      if (result.syncResult) printSyncResult(label, result.syncResult);
+      else if (result.status?.enabled) console.log(`运行 docky -w ${label} sync 可随时开始同步。`);
+    } catch (error) {
+      terminal.close();
+      if (error instanceof DockyError) fail(error.message);
+      throw error;
+    } finally {
+      terminal.close();
+    }
+  });
+
+cloud
+  .command("connect <remote>")
+  .description("Bind this workspace to a private Git remote without enabling sync yet.")
+  .option("--branch <branch>", "Remote branch name.", "main")
+  .action((remote: string, opts: { branch: string }) => {
+    const v = vault();
+    requireInit(v);
+    const status = guard(() => configureSync(v, { remote, branch: opts.branch }));
+    ok(`Cloud remote connected: ${status.remote} (${status.branch})`);
+  });
+
+cloud
+  .command("on")
+  .description("Enable Cloud Sync for this workspace.")
+  .action(() => {
+    const v = vault();
+    requireInit(v);
+    const status = guard(() => configureSync(v, { enabled: true }));
+    ok(`Cloud Sync on · ${status.remote} (${status.branch})`);
+  });
+
+cloud
+  .command("off")
+  .description("Disable all remote access for this workspace; local history remains available.")
+  .action(() => {
+    const v = vault();
+    requireInit(v);
+    guard(() => configureSync(v, { enabled: false }));
+    ok("Cloud Sync off · local documents and history are unchanged");
+  });
+
+cloud
+  .command("status")
+  .description("Show local sync status without contacting the remote.")
+  .action(() => {
+    const v = vault();
+    requireInit(v);
+    const s = getSyncStatus(v);
+    console.log(`enabled:  ${s.enabled}`);
+    console.log(`state:    ${s.state}`);
+    console.log(`remote:   ${s.remote ?? "-"}`);
+    console.log(`branch:   ${s.branch}`);
+    console.log(`pending:  ${s.pendingChanges} file(s) · ahead ${s.ahead} · behind ${s.behind}`);
+    if (s.lastSyncedAt) console.log(`synced:   ${s.lastSyncedAt}`);
+    if (s.lastError) console.log(`error:    ${s.lastError}`);
+    if (s.conflicts.length) console.log(`conflict: ${s.conflicts.join(", ")}`);
   });
 
 program
@@ -598,8 +757,8 @@ program
     try {
       const ctx = core.resolveProject(v, process.cwd());
       console.log(`project: \x1b[1m\x1b[36m${ctx.project}\x1b[0m`);
-      console.log(`branch:  ${ctx.branch ?? "-"}${core.branchScopeEnabled(v) ? " \x1b[33m(isolated · F56)\x1b[0m" : ""}`);
-      if (core.branchScopeEnabled(v)) console.log(`scope:   ${core.scopedProject(v, ctx.project, ctx.branch)}`);
+      console.log(`branch:  ${ctx.branch ?? "-"} \x1b[33m(isolated)\x1b[0m`);
+      console.log(`scope:   ${core.scopedProject(v, ctx.project, ctx.branch)}`);
       console.log(`matched: ${ctx.root}`);
     } catch (e) {
       fail((e as Error).message);

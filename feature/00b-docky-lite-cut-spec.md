@@ -27,12 +27,12 @@ updated: 2026-07-27
 | 领域 | 保留的模块 / 符号 |
 |---|---|
 | **界面** | `cli.ts`、`mcp.ts`(仅二者;TUI 全去) |
-| **作用域隔离 ★** | `registerProject` `listProjects` `resolveProject` `inferRepoName`、`projectDir` `safePath` `validateType` `ensureProjectDirs`、`scopedProject` `branchSegment` `branchScopeEnabled` `migrateBranchScope`(F56)、`resolveScopes` `addGrant` `revokeGrant` `listGrants`(F15) |
+| **作用域隔离 ★** | `registerProject` `listProjects` `resolveProject` `inferRepoName`、`projectDir` `safePath` `validateType` `ensureProjectDirs`、`scopedProject` `branchPath` `migrateBranchScope`(F56)、`resolveScopes` `addGrant` `revokeGrant` `listGrants`(F15) |
 | **检索 ★** | `searchDocs` `searchAcross`、`match.ts`(相关性/模糊) |
 | **上下文记忆 ★** | `buildContext`(F07 / get_context) |
 | **MCP ★** | `mcp.ts` 六工具、`mcpresources.ts`(resources + prompts)、`hooks.ts`(setup/guard/context + install/uninstall) |
 | **最小 CRUD** | `addDoc` `writeDoc` `smartWrite`(F20)、`scaffold` `renderScaffold` + `templates.ts`、`listDocs` `filterDocs`、`readDoc` + `pager.ts` 的 `renderMarkdown`/`pageRaw`、`removeDoc`(简化为 unlink+autoCommit)、`moveDoc`、`setStatus`(仅 draft/active/done/archived,archived 排除检索) |
-| **信任基建** | `autoCommitVault` `commitVault` `initVault`(F08 基建)、`setup`/`uninstall`、`config.ts`(最小:vault/projects/grants/branchScope/types/render) |
+| **信任基建** | `autoCommitVault` `commitVault` `initVault`(F08 基建)、`setup`/`uninstall`、`config.ts`(最小:vault/projects/grants/types/render) |
 
 ## 三、移除清单
 

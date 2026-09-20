@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import yaml from "js-yaml";
@@ -24,6 +25,15 @@ import {
 } from "./config.js";
 import { loadTemplate, renderTemplate, staleSeededTemplates } from "./templates.js";
 import { fuzzyScore } from "./match.js";
+
+/** Process-local hint for callers that use a bare project name. CLI commands
+ * are short-lived and MCP tools pass an explicit branch, so this avoids
+ * repeatedly spawning git merely to preserve the core convenience interface. */
+const activeBranchHints = new Map<string, string | null>();
+
+function branchHintKey(vault: string, project: string): string {
+  return `${path.resolve(vault)}\0${project}`;
+}
 
 // --------------------------------------------------------------------------- //
 // Git helpers
@@ -111,12 +121,21 @@ export function initVault(vault: string, useGit = true): string {
   vault = path.resolve(vault);
   fs.mkdirSync(path.join(vault, "projects"), { recursive: true });
   if (!isInitialized(vault)) saveConfig(vault, defaultConfig());
+  const ignore = path.join(vault, ".gitignore");
+  const ignored = [".docky/local.yaml", ".docky/sync-state.json", ".docky/sync.lock"];
+  const existingIgnore = fs.existsSync(ignore) ? fs.readFileSync(ignore, "utf-8") : "";
+  const missing = ignored.filter((entry) => !existingIgnore.split(/\r?\n/).includes(entry));
+  if (missing.length) {
+    const prefix = existingIgnore && !existingIgnore.endsWith("\n") ? "\n" : "";
+    fs.writeFileSync(ignore, `${existingIgnore}${prefix}${missing.join("\n")}\n`, "utf-8");
+  }
   const readme = path.join(vault, "README.md");
   if (!fs.existsSync(readme)) {
     fs.writeFileSync(
       readme,
       `# docky-vault\n\nCentralized store for AI-agent-generated Markdown docs, managed by ` +
-        `\`docky\` and organized as \`projects/<name>/<type>/\`.\n\nTypes: ${DOC_TYPES.join(", ")}\n\n` +
+        `\`docky\` and organized as \`projects/<name>/branches/<branch>/<type>/\`.\n\n` +
+        `Types: ${DOC_TYPES.join(", ")}\n\n` +
         `Scaffolding uses each type's built-in template. To override one, drop ` +
         `\`templates/<type>.md\` here — docky never writes that directory itself (F06).\n`,
       "utf-8"
@@ -163,6 +182,7 @@ export function resolveProject(vault: string, cwd: string): ProjectContext {
         `Run \`docky register <name>\` here, or pass --project explicitly.`
     );
   }
+  activeBranchHints.set(branchHintKey(vault, best.project), branch);
   return { project: best.project, branch, root: best.matched };
 }
 
@@ -178,7 +198,11 @@ export function registerProject(vault: string, name: string, localPath: string, 
   entry.link = Boolean(entry.link || link);
   cfg.projects[name] = entry;
   saveConfig(vault, cfg);
-  ensureProjectDirs(vault, name);
+  const branch = gitBranch(p);
+  activeBranchHints.set(branchHintKey(vault, name), branch);
+  // Registration materializes only the currently checked-out branch. Future
+  // branches are created lazily by writeDoc/addDoc/scaffold on first write.
+  ensureProjectDirs(vault, scopedProject(vault, name, branch));
 }
 
 export function listProjects(vault: string): Config["projects"] {
@@ -215,8 +239,27 @@ export function detectScope(vault: string, cwd: string): ScopeDetection {
 // --------------------------------------------------------------------------- //
 // Scope-safe path helpers
 // --------------------------------------------------------------------------- //
-export function projectDir(vault: string, project: string): string {
+function projectRootDir(vault: string, project: string): string {
   return path.resolve(vault, "projects", project);
+}
+
+/** Resolve a bare registered project to its currently checked-out branch.
+ * Explicit scope keys returned by scopedProject pass through unchanged. This
+ * keeps the branch decision behind one seam even for core callers/resources
+ * that only know a project name. */
+function storageScope(vault: string, project: string): string {
+  const meta = loadConfig(vault).projects[project];
+  if (!meta) return project;
+  const key = branchHintKey(vault, project);
+  if (activeBranchHints.has(key)) return scopedProject(vault, project, activeBranchHints.get(key));
+  const registeredPath = meta.paths?.[0];
+  const branch = registeredPath ? gitBranch(expand(registeredPath)) : null;
+  activeBranchHints.set(key, branch);
+  return scopedProject(vault, project, branch);
+}
+
+export function projectDir(vault: string, project: string): string {
+  return projectRootDir(vault, storageScope(vault, project));
 }
 
 export function validateType(docType: string): string {
@@ -247,43 +290,55 @@ export function ensureProjectDirs(vault: string, project: string): void {
 }
 
 // --------------------------------------------------------------------------- //
-// Branch-scoped isolation (F56) — opt-in via cfg.branchScope. When enabled, a
-// project's docs live at projects/<name>/<branch>/<type>/ so an agent on branch
-// A never reads branch B's docs. The whole mechanism is just the scope KEY:
-// scopedProject() returns "<name>/<branch>" (else the bare name), and every
-// filesystem op already keys off `project` via projectDir/safePath — so passing
-// the scoped key isolates reads/writes/trash/state/history with no other change.
+// Branch-scoped isolation (F56). Branches are a permanent part of the layout:
+// projects/<name>/branches/<git-branch>/<type>/. `scopedProject` is the single
+// seam that owns that mapping; callers never assemble storage paths themselves.
 // --------------------------------------------------------------------------- //
 /** Branch bucket used when no branch is known (detached HEAD / non-git dir). */
-export const DEFAULT_BRANCH_BUCKET = "_default";
+export const DEFAULT_BRANCH_BUCKET = "_unbranched";
+export const BRANCHES_DIR = "branches";
 
-/** True when this vault stores docs per-branch (F56). */
-export function branchScopeEnabled(vault: string): boolean {
-  return loadConfig(vault).branchScope === true;
+function shortHash(value: string): string {
+  return createHash("sha256").update(value).digest("hex").slice(0, 8);
 }
 
-/** Reduce a branch name to one safe path segment (slashes & odd chars → '-').
- *  A segment that would collide with a doc-type dir (e.g. a branch literally
- *  named "plan") or the no-branch bucket is suffixed "-branch", so branch
- *  buckets and type dirs never share a name at the projects/<name>/ level. */
-export function branchSegment(branch: string | null | undefined): string {
+/** Preserve Git's slash hierarchy while making every path segment safe. A
+ * changed segment receives a stable hash so distinct refs never collapse to
+ * the same directory. */
+function safeBranchPathSegment(segment: string): string {
+  const cleaned = segment
+    .trim()
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^[-.]+|[-.]+$/g, "");
+  if (cleaned === segment && cleaned && cleaned !== "." && cleaned !== ".." && cleaned !== DEFAULT_BRANCH_BUCKET) {
+    return cleaned;
+  }
+  return `${cleaned || "_"}-${shortHash(segment)}`;
+}
+
+export function branchPath(branch: string | null | undefined): string {
+  const value = branch?.trim();
+  if (!value) return DEFAULT_BRANCH_BUCKET;
+  return value.split("/").map(safeBranchPathSegment).join("/");
+}
+
+/** Bucket name used by docky <=0.1, where refs were flattened beside types. */
+function legacyBranchSegment(branch: string | null | undefined): string {
   const seg = (branch ?? "")
     .trim()
     .replace(/[^A-Za-z0-9._-]+/g, "-")
     .replace(/^[-.]+|[-.]+$/g, "");
-  if (!seg) return DEFAULT_BRANCH_BUCKET;
-  const reserved = new Set<string>([...DOC_TYPES, DEFAULT_BRANCH_BUCKET]);
+  if (!seg) return "_default";
+  const reserved = new Set<string>([...DOC_TYPES, "_default"]);
   return reserved.has(seg) ? `${seg}-branch` : seg;
 }
 
 /**
- * The filesystem scope key for a project. When branchScope is enabled, returns
- * "<project>/<branchSeg>"; otherwise the bare project (legacy layout). Pass the
- * result wherever a function takes `project` to scope it to the branch — when
- * the flag is off this is the identity, so callers are safe to use it always.
+ * Return the only valid document scope layout. A bare project is never a
+ * document bucket; it contains only the `branches/` namespace.
  */
-export function scopedProject(vault: string, project: string, branch?: string | null): string {
-  return branchScopeEnabled(vault) ? `${project}/${branchSegment(branch)}` : project;
+export function scopedProject(_vault: string, project: string, branch?: string | null): string {
+  return `${project}/${BRANCHES_DIR}/${branchPath(branch)}`;
 }
 
 /** A bare-level entry that holds type subdirs is a branch bucket, not a legacy
@@ -296,46 +351,66 @@ function looksLikeBranchBucket(dir: string): boolean {
 }
 
 export interface MigrateResult {
-  scope: string; // "<project>/<branchSeg>"
-  bucket: string; // branch segment docs were moved into
+  scope: string; // "<project>/branches/<branch-path>"
+  bucket: string; // branch path docs were moved into
   moved: string[]; // bare-level entries relocated into the bucket
 }
 
 /**
  * Move a project's legacy docs (stored directly under projects/<name>/) into a
- * branch bucket projects/<name>/<branchSeg>/ (F56). Run once after enabling
- * branchScope. Idempotent: skips entries already in the bucket and never moves
- * an existing branch bucket (even one whose name collides with a doc type).
+ * branch bucket projects/<name>/branches/<branch-path>/. Idempotent: occupied
+ * destinations are never overwritten.
  */
 export function migrateBranchScope(
   vault: string,
   project: string,
   branch: string | null
 ): MigrateResult {
-  const seg = branchSegment(branch);
-  const base = projectDir(vault, project);
+  const seg = branchPath(branch);
+  const base = projectRootDir(vault, project);
   if (!fs.existsSync(base) || !fs.statSync(base).isDirectory()) {
     throw new DockyError(`项目目录不存在: ${project}`);
   }
   const isMigratable = (entry: string): boolean => {
-    if (entry === seg) return false; // never move the bucket into itself
+    if (entry === BRANCHES_DIR) return false;
     const full = path.join(base, entry);
     if ((DOC_TYPES as readonly string[]).includes(entry)) {
       // a legacy type dir holds docs; a branch bucket holds type subdirs. Only
       // relocate type dirs that actually have content (empty ones are tidied below).
       return fs.statSync(full).isDirectory() && !looksLikeBranchBucket(full) && fs.readdirSync(full).length > 0;
     }
-    return entry === ".trash" || entry === "INDEX.md" || entry.startsWith(".docky-");
+    return entry === LEGACY_PARK_DIR || entry === ".trash" || entry === "INDEX.md" || entry.startsWith(".docky-");
   };
   const candidates = fs.readdirSync(base).filter(isMigratable);
   const moved: string[] = [];
-  const dest = path.join(base, seg);
-  if (candidates.length > 0) fs.mkdirSync(dest, { recursive: true });
-  for (const entry of candidates) {
-    const to = path.join(dest, entry);
-    if (fs.existsSync(to)) continue; // already migrated → leave it
-    fs.renameSync(path.join(base, entry), to);
-    moved.push(entry);
+  const dest = path.join(base, BRANCHES_DIR, seg);
+  const moveEntries = (source: string, entries: string[], label: (entry: string) => string): void => {
+    if (entries.length > 0) fs.mkdirSync(dest, { recursive: true });
+    for (const entry of entries) {
+      const from = path.join(source, entry);
+      const to = path.join(dest, entry);
+      if (fs.existsSync(to)) {
+        const stat = fs.statSync(to);
+        if (!stat.isDirectory() || fs.readdirSync(to).length > 0) continue;
+        fs.rmdirSync(to);
+      }
+      fs.renameSync(from, to);
+      moved.push(label(entry));
+    }
+  };
+
+  moveEntries(base, candidates, (entry) => entry);
+
+  // Also upgrade the previous F56 layout (`<project>/<flattened-branch>/`).
+  const oldBucketName = legacyBranchSegment(branch);
+  const oldBucket = path.join(base, oldBucketName);
+  if (oldBucketName !== BRANCHES_DIR && fs.existsSync(oldBucket) && looksLikeBranchBucket(oldBucket)) {
+    const oldEntries = fs.readdirSync(oldBucket).filter((entry) => {
+      const full = path.join(oldBucket, entry);
+      return fs.statSync(full).isDirectory() || entry === "INDEX.md" || entry.startsWith(".docky-");
+    });
+    moveEntries(oldBucket, oldEntries, (entry) => `${oldBucketName}/${entry}`);
+    if (fs.readdirSync(oldBucket).length === 0) fs.rmdirSync(oldBucket);
   }
   // Tidy: drop now-empty legacy type dirs left at the bare level (e.g. the
   // scaffolding ensureProjectDirs pre-creates) so projects/<name>/ holds buckets only.
@@ -347,8 +422,9 @@ export function migrateBranchScope(
       /* best-effort cleanup */
     }
   }
+  ensureProjectDirs(vault, scopedProject(vault, project, branch));
   if (moved.length) autoCommitVault(vault, `migrate branch-scope: ${project} → ${seg} (${moved.length})`);
-  return { scope: `${project}/${seg}`, bucket: seg, moved };
+  return { scope: scopedProject(vault, project, branch), bucket: seg, moved };
 }
 
 // --------------------------------------------------------------------------- //
@@ -392,19 +468,32 @@ function typeDirNames(): Set<string> {
 }
 
 /**
- * The scopes inside a project that can hold type dirs: the project dir itself
- * (legacy flat layout) plus each branch bucket (F56 layout). Anything that is a
- * type dir, the trash, or the legacy park is not a scope.
+ * Find every directory that can contain document types: the legacy project
+ * root, legacy one-level branch buckets, and the current recursively nested
+ * branches/<git-ref>/ layout.
  */
 function scopeDirsOf(vault: string, project: string): { scope: string; dir: string }[] {
-  const base = projectDir(vault, project);
+  const base = projectRootDir(vault, project);
   if (!fs.existsSync(base) || !fs.statSync(base).isDirectory()) return [];
   const out = [{ scope: project, dir: base }];
   const skip = typeDirNames();
+
+  const collect = (dir: string, scope: string): void => {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    if (entries.some((e) => e.isDirectory() && skip.has(e.name))) {
+      out.push({ scope, dir });
+      return;
+    }
+    for (const e of entries) {
+      if (!e.isDirectory() || e.name === LEGACY_PARK_DIR || e.name.startsWith(".")) continue;
+      collect(path.join(dir, e.name), `${scope}/${e.name}`);
+    }
+  };
+
   for (const e of fs.readdirSync(base, { withFileTypes: true })) {
     if (!e.isDirectory()) continue;
     if (skip.has(e.name) || e.name === LEGACY_PARK_DIR || e.name.startsWith(".")) continue;
-    out.push({ scope: `${project}/${e.name}`, dir: path.join(base, e.name) });
+    collect(path.join(base, e.name), `${project}/${e.name}`);
   }
   return out;
 }
@@ -429,7 +518,7 @@ export function migrateTypes(
     // This command moves files, so a mistyped project name must not read as
     // "nothing to migrate" — a project docky has never stored a doc for has no
     // directory here, and neither does a typo.
-    if (!fs.existsSync(projectDir(vault, opts.project))) {
+    if (!fs.existsSync(projectRootDir(vault, opts.project))) {
       throw new DockyError(
         `Project '${opts.project}' has no directory in the vault. ` +
           `Run 'docky projects' to see the projects docky knows about.`

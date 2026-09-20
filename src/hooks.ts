@@ -73,10 +73,10 @@ export function contextText(vault: string, cwd: string, initialized: boolean): s
   if (initialized) {
     try {
       const ctx = core.resolveProject(vault, cwd);
-      // Scope the injected doc list to the current branch when branchScope is on (F56).
+      // Scope the injected doc list to the current branch (F56).
       const scope = core.scopedProject(vault, ctx.project, ctx.branch);
       const docs = core.listDocs(vault, scope);
-      const onBranch = core.branchScopeEnabled(vault) ? ` @ ${ctx.branch ?? "-"}` : "";
+      const onBranch = ` @ ${ctx.branch ?? "-"}`;
       lines.push("", `### 当前项目: ${ctx.project}${onBranch}(${docs.length} 篇)`);
       for (const d of docs) lines.push(`- ${d.rel} — ${d.title}`);
     } catch {

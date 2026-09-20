@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import * as core from "../src/core.js";
-import { getConfigValue, listConfig, loadConfig, setConfigValue } from "../src/config.js";
+import { getConfigValue, listConfig, loadConfig, localConfigPath, setConfigValue } from "../src/config.js";
 
 let tmp: string;
 let vault: string;
@@ -46,5 +46,37 @@ describe("config preferences (F18)", () => {
     fs.mkdirSync(path.join(fresh, ".docky"), { recursive: true });
     fs.writeFileSync(path.join(fresh, ".docky", "config.yaml"), "version: 1\nprojects: {}\n");
     expect(getConfigValue(fresh, "theme")).toBe("dark");
+  });
+
+  it("migrates a v1 project path into ignored local config on save", () => {
+    const fresh = path.join(tmp, "old-vault-with-project");
+    const oldPath = path.join(tmp, "legacy-private-path");
+    fs.mkdirSync(path.join(fresh, ".docky"), { recursive: true });
+    fs.writeFileSync(
+      path.join(fresh, ".docky", "config.yaml"),
+      `version: 1\nprojects:\n  old:\n    paths:\n      - ${oldPath}\n    link: false\nautocommit: manual\n`
+    );
+
+    const loaded = loadConfig(fresh);
+    expect(loaded.projects.old.paths).toEqual([oldPath]);
+    core.initVault(fresh, false);
+    // Any config save, including the one Cloud Sync performs before connect,
+    // rewrites the shared file and preserves the local registration separately.
+    setConfigValue(fresh, "theme", "none");
+    expect(fs.readFileSync(path.join(fresh, ".docky", "config.yaml"), "utf-8")).not.toContain(oldPath);
+    expect(fs.readFileSync(localConfigPath(fresh), "utf-8")).toContain(oldPath);
+  });
+
+  it("keeps device paths and preferences out of the shared config", () => {
+    const localProject = path.join(tmp, "private-project-path");
+    core.registerProject(vault, "private", localProject);
+    setConfigValue(vault, "width", "100");
+
+    const shared = fs.readFileSync(path.join(vault, ".docky", "config.yaml"), "utf-8");
+    const local = fs.readFileSync(localConfigPath(vault), "utf-8");
+    expect(shared).not.toContain(localProject);
+    expect(shared).not.toContain("render:");
+    expect(local).toContain(localProject);
+    expect(local).toContain("width: 100");
   });
 });
