@@ -1,64 +1,85 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import yaml from "js-yaml";
 import { AutocommitMode, Config, DOC_TYPES, DockyError } from "./types.js";
+import { resolveWorkspace } from "./workspaces.js";
 
 const CONFIG_RELPATH = path.join(".docky", "config.yaml");
+const LOCAL_CONFIG_RELPATH = path.join(".docky", "local.yaml");
 
-/** Resolve the central vault directory: $DOCKY_VAULT, else ~/docky-vault. */
-export function getVaultPath(): string {
-  const env = process.env.DOCKY_VAULT;
-  return path.resolve(env ? expandHome(env) : path.join(os.homedir(), "docky-vault"));
-}
-
-function expandHome(p: string): string {
-  return p.startsWith("~") ? path.join(os.homedir(), p.slice(1)) : p;
+/** Resolve a named/active workspace while preserving the legacy
+ * $DOCKY_VAULT override when no explicit workspace is supplied. */
+export function getVaultPath(workspace?: string): string {
+  return resolveWorkspace(workspace).path;
 }
 
 export function configPath(vault: string): string {
   return path.join(vault, CONFIG_RELPATH);
 }
 
-export const DEFAULT_STALE_DAYS = 30;
+/** Device-local config: absolute project paths and user preferences must never
+ * be committed or transferred to another machine. */
+export function localConfigPath(vault: string): string {
+  return path.join(vault, LOCAL_CONFIG_RELPATH);
+}
 
 export function defaultConfig(): Config {
   return {
-    version: 1,
+    version: 2,
     types: [...DOC_TYPES],
     projects: {},
-    staleDays: DEFAULT_STALE_DAYS,
     autocommit: "auto",
     grants: {},
     render: { theme: "dark" },
-    branchScope: false,
   };
 }
 
 export function loadConfig(vault: string): Config {
   const cp = configPath(vault);
   if (!fs.existsSync(cp)) return defaultConfig();
-  const data = (yaml.load(fs.readFileSync(cp, "utf-8")) as Partial<Config>) || {};
-  const mode = data.autocommit;
+  const shared = (yaml.load(fs.readFileSync(cp, "utf-8")) as Partial<Config>) || {};
+  const lp = localConfigPath(vault);
+  const local = fs.existsSync(lp)
+    ? ((yaml.load(fs.readFileSync(lp, "utf-8")) as Partial<Config>) || {})
+    : {};
+  // A v1 vault stored everything in config.yaml. Fall back to those fields
+  // until the next save migrates them into local.yaml.
+  const mode = local.autocommit ?? shared.autocommit;
   return {
-    version: data.version ?? 1,
-    types: data.types ?? [...DOC_TYPES],
-    projects: data.projects ?? {},
-    staleDays: typeof data.staleDays === "number" ? data.staleDays : DEFAULT_STALE_DAYS,
+    version: shared.version ?? 1,
+    types: shared.types ?? [...DOC_TYPES],
+    projects: local.projects ?? shared.projects ?? {},
     autocommit: mode === "manual" || mode === "off" ? mode : "auto",
-    grants: data.grants && typeof data.grants === "object" ? data.grants : {},
+    grants: shared.grants && typeof shared.grants === "object" ? shared.grants : {},
     render: {
-      width: typeof data.render?.width === "number" ? data.render.width : undefined,
-      theme: data.render?.theme === "none" ? "none" : "dark",
+      width:
+        typeof local.render?.width === "number"
+          ? local.render.width
+          : typeof shared.render?.width === "number"
+            ? shared.render.width
+            : undefined,
+      theme: (local.render?.theme ?? shared.render?.theme) === "none" ? "none" : "dark",
     },
-    branchScope: data.branchScope === true,
   };
 }
 
 export function saveConfig(vault: string, cfg: Config): void {
   const cp = configPath(vault);
   fs.mkdirSync(path.dirname(cp), { recursive: true });
-  fs.writeFileSync(cp, yaml.dump(cfg, { sortKeys: false }), "utf-8");
+  // Only portable, non-sensitive data belongs to the tracked vault config.
+  fs.writeFileSync(
+    cp,
+    yaml.dump({ version: 2, types: cfg.types, grants: cfg.grants }, { sortKeys: false }),
+    "utf-8"
+  );
+  fs.writeFileSync(
+    localConfigPath(vault),
+    yaml.dump(
+      { version: 1, projects: cfg.projects, autocommit: cfg.autocommit, render: cfg.render },
+      { sortKeys: false }
+    ),
+    "utf-8"
+  );
 }
 
 export function isInitialized(vault: string): boolean {
@@ -77,17 +98,6 @@ interface ConfigKeyDef {
 }
 
 export const CONFIG_KEYS: ConfigKeyDef[] = [
-  {
-    key: "staleDays",
-    desc: "F03 陈旧阈值(天)",
-    default: String(DEFAULT_STALE_DAYS),
-    get: (c) => String(c.staleDays),
-    set: (c, v) => {
-      const n = Number(v);
-      if (!Number.isInteger(n) || n < 1) throw new DockyError("staleDays 须为正整数");
-      c.staleDays = n;
-    },
-  },
   {
     key: "autocommit",
     desc: "F08 自动提交: auto|manual|off",
@@ -117,16 +127,6 @@ export const CONFIG_KEYS: ConfigKeyDef[] = [
       const n = Number(v);
       if (!Number.isInteger(n) || n < 0) throw new DockyError("width 须为非负整数");
       c.render.width = n === 0 ? undefined : n;
-    },
-  },
-  {
-    key: "branchScope",
-    desc: "F56 按分支隔离: true|false(改后跑 docky migrate-branch-scope)",
-    default: "false",
-    get: (c) => String(c.branchScope),
-    set: (c, v) => {
-      if (v !== "true" && v !== "false") throw new DockyError("branchScope 须为 true|false");
-      c.branchScope = v === "true";
     },
   },
 ];

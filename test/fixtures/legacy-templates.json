@@ -1,0 +1,7 @@
+{
+  "design": "---\ntype: design\nstatus: draft\ntags: []\n---\n\n# {{title}}\n\n## 背景\n\n## 目标 / 非目标\n\n## 方案\n\n## 风险与取舍\n",
+  "plan": "---\ntype: plan\nstatus: draft\ntags: []\n---\n\n# {{title}}\n\n## 目标\n\n## 步骤\n\n## 验收标准\n\n## 风险\n",
+  "debug": "---\ntype: debug\nstatus: draft\ntags: []\n---\n\n# {{title}}\n\n## 复现步骤\n\n## 期望结果\n\n## 实际结果\n\n## 影响\n\n## 根因与归属\n",
+  "code-review": "---\ntype: code-review\nstatus: draft\ntags: []\n---\n\n# {{title}}\n\n## 范围\n\n## 阻断项 (blocking)\n\n## 建议 (non-blocking)\n\n## 结论\n",
+  "prompts": "---\ntype: prompts\nstatus: draft\ntags: []\n---\n\n# {{title}}\n\n## 用途\n\n## Prompt\n\n## 示例输入 / 输出\n\n## 注意事项\n"
+}

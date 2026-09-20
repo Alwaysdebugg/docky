@@ -4,7 +4,7 @@ import { fuzzy, fuzzyScore } from "../src/match.js";
 describe("fuzzyScore", () => {
   it("matches a subsequence (non-contiguous)", () => {
     expect(fuzzyScore("lgn", "login")).not.toBeNull();
-    expect(fuzzyScore("dsn", "design")).not.toBeNull();
+    expect(fuzzyScore("cnst", "constitution")).not.toBeNull();
   });
 
   it("is case-insensitive", () => {
@@ -43,9 +43,9 @@ describe("fuzzyScore", () => {
 
 describe("fuzzy", () => {
   const docs = [
-    { type: "design", title: "登录鉴权改造", name: "login-auth.md" },
-    { type: "debug", title: "登录丢 session 排查", name: "login-session.md" },
-    { type: "prompts", title: "退款话术", name: "refund-prompt.md" },
+    { type: "spec", title: "登录鉴权改造", name: "login-auth.md" },
+    { type: "tasks", title: "登录丢 session 排查", name: "login-session.md" },
+    { type: "glossary", title: "退款话术", name: "refund-prompt.md" },
   ];
   const toText = (d: (typeof docs)[number]) => `${d.type} ${d.title} ${d.name}`;
 

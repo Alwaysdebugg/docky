@@ -13,6 +13,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import * as core from "./core.js";
 import { getVaultPath } from "./config.js";
+import { getSyncStatus, syncWorkspace } from "./sync.js";
+import { DOC_TYPES, DOC_TYPE_HINT, DOC_TYPE_SPECS, REVIEW_HINT } from "./types.js";
 import { DockyError } from "./types.js";
 import {
   contextPromptMessages,
@@ -22,9 +24,10 @@ import {
 } from "./mcpresources.js";
 
 const server = new McpServer({ name: "docky", version: "0.1.0" });
+const ACTIVE_VAULT = getVaultPath();
 
 function vault(): string {
-  return getVaultPath();
+  return ACTIVE_VAULT;
 }
 
 function text(value: unknown) {
@@ -37,14 +40,12 @@ function fail(e: unknown) {
   return { content: [{ type: "text" as const, text: msg }], isError: true };
 }
 
-// Branch isolation key (F56). Optional everywhere: when this vault has
-// branchScope enabled, it scopes the call to projects/<name>/<branch>/ — get it
-// from resolve_project and pass it back. Omitted/empty → the '_default' bucket.
-// When branchScope is off it is ignored, so it is always safe to send.
+// Branch isolation key (F56). Optional everywhere; omitted/empty uses the
+// '_unbranched' bucket. Agents should pass the value from resolve_project.
 const BRANCH_ARG = z
   .string()
   .optional()
-  .describe("Branch isolation key (F56) from resolve_project. Omit if unknown → '_default' bucket.");
+  .describe("Branch isolation key (F56) from resolve_project. Omit if unknown → '_unbranched' bucket.");
 
 server.registerTool(
   "resolve_project",
@@ -52,10 +53,9 @@ server.registerTool(
     description:
       "Infer the project that owns a working directory (via path + git branch). " +
       "Returns {project, branch, matched}. Throws if the directory is not registered — " +
-      "the server never falls back to a global scope. When this vault has branch " +
-      "isolation enabled (F56), `branch` is the read/write isolation key: pass it back " +
-      "to the other tools so an agent on branch A never sees branch B's docs. " +
-      "branchScope reports whether that isolation is active.",
+      "the server never falls back to a global scope. `branch` is the read/write " +
+      "isolation key: pass it back to the other tools so an agent on branch A never " +
+      "sees branch B's docs.",
     inputSchema: { cwd: z.string().describe("Absolute working directory path.") },
   },
   async ({ cwd }) => {
@@ -65,7 +65,7 @@ server.registerTool(
         project: ctx.project,
         branch: ctx.branch,
         matched: ctx.root,
-        branchScope: core.branchScopeEnabled(vault()),
+        branchScope: true,
       });
     } catch (e) {
       return fail(e);
@@ -79,11 +79,11 @@ server.registerTool(
     description:
       "List documents within a project's scope. Optionally filter by type, " +
       "lifecycle status, or tag. Archived docs are hidden unless status='archived'. " +
-      "Prefer calling this (and reading INDEX) before pulling full doc bodies.",
+      "Prefer calling this before pulling full doc bodies.",
     inputSchema: {
       project: z.string(),
       branch: BRANCH_ARG,
-      type: z.string().optional().describe("design | plan | debug | code-review | prompts"),
+      type: z.string().optional().describe(DOC_TYPE_HINT),
       status: z.string().optional().describe("draft | active | done | archived"),
       tag: z.string().optional().describe("Filter to docs carrying this tag."),
     },
@@ -93,7 +93,7 @@ server.registerTool(
       const scope = core.scopedProject(vault(), project, branch);
       const docs = core.filterDocs(core.listDocs(vault(), scope, type), { status, tag });
       return text(
-        docs.map((d) => ({ type: d.type, title: d.title, rel: d.rel, status: d.status, tags: d.tags, stale: d.stale }))
+        docs.map((d) => ({ type: d.type, title: d.title, rel: d.rel, status: d.status, tags: d.tags }))
       );
     } catch (e) {
       return fail(e);
@@ -105,7 +105,7 @@ server.registerTool(
   "read_doc",
   {
     description:
-      "Read a single document by its project-relative path (e.g. design/x.md). " +
+      "Read a single document by its project-relative path (e.g. spec/x.md). " +
       "Paths that escape the project scope are refused.",
     inputSchema: { project: z.string(), branch: BRANCH_ARG, path: z.string() },
   },
@@ -160,7 +160,7 @@ server.registerTool(
   "write_doc",
   {
     description:
-      "Write a document into <project>/<type>/<name>.md (scope-checked). Smart by " +
+      "Write a document into <project>/branches/<branch>/<type>/<name>.md (scope-checked). Smart by " +
       "default (F20): in mode 'new' it will NOT silently overwrite or duplicate — if " +
       "the name exists or a near-duplicate is found, it returns a suggestion instead " +
       "of writing. New docs are date-stamped automatically: a YYYY-MM-DD-HHmm- prefix " +
@@ -172,7 +172,7 @@ server.registerTool(
     inputSchema: {
       project: z.string(),
       branch: BRANCH_ARG,
-      type: z.string(),
+      type: z.string().describe(`${DOC_TYPE_HINT}。各类型的审查强度:${REVIEW_HINT}`),
       name: z
         .string()
         .describe(
@@ -193,7 +193,22 @@ server.registerTool(
         body = body ? `${skeleton}\n\n${body}` : skeleton;
       }
       const scope = core.scopedProject(vault(), project, branch);
-      return text(core.smartWrite(vault(), scope, type, name, body, mode ?? "new"));
+      const outcome = core.smartWrite(vault(), scope, type, name, body, mode ?? "new");
+      if (outcome.status === "written" || outcome.status === "appended") {
+        const status = getSyncStatus(vault());
+        if (status.enabled) {
+          const synced = syncWorkspace(vault(), "automatic");
+          return text({
+            ...outcome,
+            cloudSync: {
+              state: synced.status.state,
+              pending: synced.status.pendingChanges,
+              error: synced.status.lastError,
+            },
+          });
+        }
+      }
+      return text(outcome);
     } catch (e) {
       return fail(e);
     }
@@ -273,25 +288,21 @@ server.registerPrompt(
   ({ project, query }) => ({ messages: contextPromptMessages(vault(), project, query) })
 );
 
-server.registerPrompt(
-  "start-debug-doc",
-  {
-    description: "Start a new debug document from the docky template (F06).",
-    argsSchema: { project: z.string(), name: z.string() },
-  },
-  ({ project, name }) => ({ messages: scaffoldPromptMessages(vault(), "debug", project, name) })
-);
-
-server.registerPrompt(
-  "start-design-doc",
-  {
-    description: "Start a new design document from the docky template (F06).",
-    argsSchema: { project: z.string(), name: z.string() },
-  },
-  ({ project, name }) => ({ messages: scaffoldPromptMessages(vault(), "design", project, name) })
-);
+// One scaffold prompt per doc type, generated from the taxonomy so adding a type
+// never leaves a prompt behind. Each prompt carries the type's review policy.
+for (const t of DOC_TYPES) {
+  server.registerPrompt(
+    `start-${t}-doc`,
+    {
+      description: `Start a new ${t} document from the docky template (F06). ${DOC_TYPE_SPECS[t].purpose};审查:${DOC_TYPE_SPECS[t].policy}`,
+      argsSchema: { project: z.string(), name: z.string() },
+    },
+    ({ project, name }) => ({ messages: scaffoldPromptMessages(vault(), t, project, name) })
+  );
+}
 
 async function main(): Promise<void> {
+  if (getSyncStatus(vault()).enabled) syncWorkspace(vault(), "automatic");
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
