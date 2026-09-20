@@ -16,3 +16,6 @@ coverage/
 
 # FUSE / editor leftovers
 .fuse_hidden*
+*.swp
+*.swo
+*~

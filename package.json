@@ -2,6 +2,23 @@
   "name": "docky",
   "version": "0.1.0",
   "description": "Centralized Markdown doc manager for AI-agent-assisted development, with per-project scope isolation.",
+  "keywords": [
+    "markdown",
+    "mcp",
+    "ai-agents",
+    "knowledge-base",
+    "documentation",
+    "cli"
+  ],
+  "homepage": "https://github.com/Alwaysdebugg/docky#readme",
+  "bugs": {
+    "url": "https://github.com/Alwaysdebugg/docky/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Alwaysdebugg/docky.git"
+  },
+  "license": "MIT",
   "type": "module",
   "bin": {
     "docky": "dist/cli.js",

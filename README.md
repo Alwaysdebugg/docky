@@ -1,217 +1,370 @@
 <div align="center">
 
-```
-██████╗  ██████╗  ██████╗██╗  ██╗██╗   ██╗
-██╔══██╗██╔═══██╗██╔════╝██║ ██╔╝╚██╗ ██╔╝
-██║  ██║██║   ██║██║     █████╔╝  ╚████╔╝
-██║  ██║██║   ██║██║     ██╔═██╗   ╚██╔╝
-██████╔╝╚██████╔╝╚██████╗██║  ██╗   ██║
-╚═════╝  ╚═════╝  ╚═════╝╚═╝  ╚═╝   ╚═╝
-```
+# ⚓ Docky
 
-**A centralized home for the Markdown your AI agents generate — organized by project & type, decoupled from each repo's git, and served to agents with hard per-project scope isolation.**
+### A local-first Markdown vault for humans and AI coding agents
 
-![tests](https://img.shields.io/badge/tests-136%20passing-brightgreen)
-![node](https://img.shields.io/badge/node-%E2%89%A518-339933?logo=node.js&logoColor=white)
-![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178c6?logo=typescript&logoColor=white)
-![MCP](https://img.shields.io/badge/MCP-server-7c3aed)
-![license](https://img.shields.io/badge/license-MIT-blue)
+Keep specs, plans, decisions, and project memory out of your source repositories—without losing search, history, branch context, or agent access.
 
-CLI · MCP server
+[![Version](https://img.shields.io/badge/version-0.1.0-7c3aed?style=flat-square)](https://github.com/Alwaysdebugg/docky)
+[![Tests](https://img.shields.io/badge/tests-140%20passing-22c55e?style=flat-square)](#development)
+[![Node.js](https://img.shields.io/badge/node-%E2%89%A518-339933?style=flat-square&logo=node.js&logoColor=white)](package.json)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178c6?style=flat-square&logo=typescript&logoColor=white)](tsconfig.json)
+[![MCP](https://img.shields.io/badge/MCP-stdio%20server-f97316?style=flat-square)](#connect-an-ai-agent)
+[![License](https://img.shields.io/badge/license-MIT-2563eb?style=flat-square)](LICENSE)
+
+[Quick start](#quick-start) · [How it works](#how-it-works) · [Cloud Sync](#cloud-storage--sync) · [MCP](#connect-an-ai-agent) · [CLI](#command-reference) · [Contributing](#contributing)
 
 </div>
 
 ---
 
-## Why docky?
+## Why Docky?
 
-When you build with AI coding agents, they produce a steady stream of process Markdown — principles, specs, plans, task lists, decision records, glossaries. Left in each repo, those docs:
+AI coding agents create valuable process documents: principles, specifications, implementation plans, task lists, architecture decisions, and shared terminology. Keeping all of them inside application repositories creates three recurring problems:
 
-- **pollute git** — `git diff`/`log` get buried under non-code churn;
-- **scatter** — no single place to find or search history across projects;
-- **pollute agent context** — an agent reads unrelated docs, wasting tokens and getting misled.
+- source history fills with documentation churn;
+- knowledge becomes scattered across repositories and branches;
+- agents load unrelated context and make worse decisions.
 
-**docky** pulls these docs out of your repos into one **central vault** (its own git repo), filed as `projects/<name>/branches/<branch>/<type>/`. You browse and search from the command line; agents read and write through an MCP server that confines every call to one project and Git branch.
+Docky stores those documents in a dedicated, versioned Markdown vault. The CLI gives humans a fast interface; the MCP server gives agents scoped read and write tools. Your application repositories stay focused on code.
 
-> docky is deliberately small: it does four things well — **search**, **agent context/memory**, **scope isolation**, and **MCP integration** — and stays out of your way.
+> **Local first by design.** Your files live on your machine, remain readable with ordinary tools, and can optionally sync through a private Git remote.
 
-## Features
+## Highlights
 
-- **Six fixed doc types, each with a review policy** — `constitution` · `spec` · `plan` · `tasks` · `adr` · `glossary`. Predictable structure for humans and machines, and an explicit answer to "how hard do I review this?" ([see below](#doc-types--review-policy)).
-- **Automatic project detection** — resolves the current project from your working directory + git repo root + branch. Never falls back to a global scope.
-- **Hard scope isolation** — every read/write is bounded to one project; any `../` path escape is refused (unit-tested).
-- **Two interfaces** — a scriptable **CLI** and an **MCP server** for agents.
-- **Relevance search** — ranked full-text search with highlighted snippets, fuzzy matching, and cross-project (granted, read-only) search.
-- **One-shot agent context** — `get_context` returns a ranked, budget-bounded bundle of a project's most relevant docs.
-- **Governed cross-project access** — explicit, auditable, read-only grants on top of the default full isolation.
-- **Branch-scoped isolation** — every project stores docs by Git branch, so an agent on branch A never reads branch B's docs.
-- **Named workspaces** — keep personal, work, and client vaults isolated, switch globally or select one command with `--workspace`.
-- **Cloud Storage & Sync** — opt-in per workspace; private Git remotes synchronize through commit → fetch → rebase → push, with offline-safe pending state and non-destructive conflict detection.
-- **Versioned** — the vault auto-commits on writes, so history is always recoverable from git.
-- **Smart (non-duplicating) agent writes** — `write_doc` won't silently overwrite or duplicate; it returns a suggestion instead.
-- **One-command Claude Code hooks** — inject the "process docs live in docky" policy and guard against stray in-repo writes.
-
-## Doc types & review policy
-
-Review effort is not uniform — a constitution earns a hard read once, a task list earns none. Each type carries that rule as data (`DOC_TYPE_SPECS` in `src/types.ts`), and the CLI help, the MCP tool descriptions and the `SessionStart` hook all render from that one map, so the rule an agent sees can't drift between surfaces.
-
-| Type | Holds | Review |
+| | Capability | What it gives you |
 |---|---|---|
-| `constitution` | 项目的硬性原则与红线,长期不变 | 写的时候审透,之后几乎不看 |
-| `spec` | 需求与验收标准 —— 做成什么样才算做完 | **必审(每次)** |
-| `plan` | 实现方案、设计与步骤 | 抽检,重点看有没有违反 constitution |
-| `tasks` | 可执行的任务清单与拆解 | 不审 —— 撞墙自然会反馈 |
-| `adr` | 架构决策记录:决定了什么、为什么、代价是什么 | **必审** |
-| `glossary` | 术语表:项目内统一的名词与定义 | 只审新增条目 |
+| 🧭 | **Automatic project detection** | Resolves the project from the current directory, Git root, and branch. |
+| 🔒 | **Hard scope isolation** | Every tool call is confined to one project and branch; path escapes are rejected. |
+| 🧠 | **Agent-ready context** | Ranked search and budget-bounded context bundles reduce noisy MCP round trips. |
+| 🌿 | **Branch-aware documents** | Work on one branch without leaking documents from another branch into agent context. |
+| 🗂️ | **Named workspaces** | Keep personal, work, and client vaults isolated on the same device. |
+| ☁️ | **Optional Cloud Sync** | Synchronize through a private Git remote with offline-safe commits and conflict detection. |
+| 🕰️ | **Recoverable history** | Vault writes can be auto-committed, so previous document versions remain available in Git. |
+| 🤝 | **Governed sharing** | Explicit read-only grants allow selected cross-project context without removing isolation. |
+| ✍️ | **Safe agent writes** | Duplicate detection and explicit append/replace/merge modes prevent silent overwrites. |
+| 🔌 | **CLI + MCP** | Use Docky directly or connect Codex, Claude Code, and other MCP clients. |
 
-The review level also orders the `get_context` bundle: what an agent must always re-read is what it should see first, so durable, authoritative docs (`constitution`/`spec`/`adr`) outrank a throwaway `tasks` list.
+## How it works
 
-**Templates are opt-in.** Each type scaffolds from a built-in skeleton; docky never writes to `templates/`. Drop a `templates/<type>.md` into the vault to override one — a file there means a human put it there, so it always wins, and a built-in that later improves reaches every vault instead of being shadowed forever by a copy seeded at `init` time.
+```mermaid
+flowchart LR
+    Human["Developer"] -->|CLI| Docky["Docky"]
+    Agent["AI agent<br/>Codex · Claude · MCP client"] <-->|MCP over stdio| Docky
+    Repo["Project repository<br/>code stays here"] -. "cwd + Git branch" .-> Docky
+    Docky --> Vault[("Local Markdown vault<br/>project + branch + type")]
+    Vault <-->|"commit · fetch · rebase · push"| Remote[("Private Git remote<br/>optional")]
 
-**Migrating a vault filed under the old types** — `docky migrate-types` merges `design` into `plan` and parks `debug`/`code-review`/`prompts` under `_legacy/`, inside the project (or branch) scope but outside every type dir: files and git history are kept and still greppable, docky simply stops indexing them. It handles the flat and branch-bucket layouts alike, never overwrites an occupied destination (it reports a conflict and skips), and is a **dry run unless you pass `--apply`**:
-
-```bash
-docky migrate-types                 # print the plan, touch nothing
-docky migrate-types --apply         # move the files, auto-committed to the vault's git
-docky migrate-types -p my-project   # scope it to one project (leaves templates alone)
+    classDef core fill:#7c3aed,color:#fff,stroke:#6d28d9;
+    classDef store fill:#0f766e,color:#fff,stroke:#115e59;
+    class Docky core;
+    class Vault,Remote store;
 ```
 
-It also clears out the templates older versions of docky seeded at `init`, which would otherwise shadow the built-ins forever — `plan.md` is the one that bites, since its seeded copy predates the taxonomy. Only files still byte-identical to what docky wrote are removed; anything you edited stays.
+Documents are stored in a predictable hierarchy:
 
-## Install
+```text
+~/docky-vault/
+├── .docky/
+│   ├── config.yaml          # safe, shareable configuration
+│   └── local.yaml           # device paths and preferences; Git-ignored
+└── projects/
+    └── my-app/
+        └── branches/
+            └── feat/
+                └── login/
+                    ├── constitution/
+                    ├── spec/
+                    ├── plan/
+                    ├── tasks/
+                    ├── adr/
+                    └── glossary/
+```
 
-Requires Node ≥ 18.
+Git does not track empty directories, so a type directory appears in the remote after its first document is created.
+
+## Requirements
+
+- Node.js 18 or newer
+- Git
+- An MCP-compatible client if you want agent integration
+- A private Git remote if you want Cloud Sync
+
+## Installation
+
+Docky is currently installed from source:
 
 ```bash
-git clone <your-fork-or-repo-url> docky
+git clone https://github.com/Alwaysdebugg/docky.git
 cd docky
-npm install      # installs deps and builds (via the prepare script)
-npm link         # put `docky` and `docky-mcp` on your PATH
+npm install
+npm link
 ```
 
-Or install globally from a checkout: `npm install -g .`
+This installs two commands:
+
+```text
+docky       Human-facing CLI
+docky-mcp   Local MCP server over stdio
+```
+
+You can also install globally from an existing checkout:
+
+```bash
+npm install -g .
+```
 
 ## Quick start
 
-```bash
-docky setup                                      # init vault + register this repo + install hooks + show MCP hint
-claude mcp add --scope user docky -- docky-mcp   # connect Claude Code (one-time)
-```
-
-That's it. Then, day to day:
+From a project you want Docky to manage:
 
 ```bash
-docky add adr ./architecture.md          # archive a doc (project auto-detected)
-docky new spec "login timeout"           # scaffold a new doc from its type template
-docky list                               # browse this project's docs
-docky search "session lost"              # full-text search within scope
+docky setup
 ```
 
-## The two interfaces
+This initializes the default vault, registers the current project, installs the project-level Claude Code hooks, and prints the MCP connection command.
 
-### CLI
+Try the core workflow:
 
-A scriptable command for every operation — archiving, creating, listing, searching, lifecycle, cross-project grants, and versioning. Run `docky --help`, or see the [command reference](#command-reference).
+```bash
+docky new spec login-timeout
+docky list spec
+docky search "session timeout"
+docky open spec/login-timeout.md
+```
 
-### MCP server
+Docky detects the project and current Git branch from your working directory.
 
-`docky-mcp` speaks the Model Context Protocol over stdio. Tools (all scope-isolated):
+## Connect an AI agent
+
+### Codex
+
+```bash
+codex mcp add docky -- docky-mcp
+codex mcp list
+```
+
+Restart the Codex client after adding the server. If your desktop app does not inherit the shell PATH, configure the absolute paths to Node.js and `dist/mcp.js` instead.
+
+### Claude Code
+
+```bash
+claude mcp add --scope user docky -- docky-mcp
+```
+
+### Generic MCP client
+
+```json
+{
+  "mcpServers": {
+    "docky": {
+      "command": "docky-mcp"
+    }
+  }
+}
+```
+
+### MCP tools
 
 | Tool | Purpose |
 |---|---|
-| `resolve_project(cwd)` | Infer the project + branch that owns a working directory |
-| `list_docs(project, type?)` | List docs within scope |
-| `read_doc(project, path)` | Read one doc (e.g. `spec/x.md`); path escapes are refused |
-| `search_docs(project, query, type?)` | Relevance search within scope |
-| `write_doc(project, type, name, content, mode?)` | Write a doc; `mode` defaults to `new` and won't silently overwrite/duplicate |
-| `get_context(project, …)` | A ranked, one-shot context bundle for the project |
+| `resolve_project` | Resolve a working directory to its registered project and Git branch. |
+| `list_docs` | List documents by type, lifecycle status, or tag. |
+| `read_doc` | Read one scope-checked document. |
+| `search_docs` | Run relevance-ranked search with highlighted snippets. |
+| `write_doc` | Create, append, preview-merge, or explicitly replace a document. |
+| `get_context` | Return a ranked document bundle within a token budget. |
 
-It also exposes docs as MCP **resources** and provides one scaffold **prompt** per doc type (`start-spec-doc`, `start-adr-doc`, …), each carrying that type's review policy. Configure your client with:
+The server also exposes documents as MCP resources and provides one scaffold prompt per document type.
 
-```json
-{ "mcpServers": { "docky": { "command": "docky-mcp" } } }
-```
+## Document types
 
-## Claude Code integration (hooks)
+Docky uses a small, fixed taxonomy so humans and agents agree on where knowledge belongs and how carefully it should be reviewed.
 
-Make agents default to docky for process docs — one command, no scripts or `jq`:
+| Type | Use it for | Review policy |
+|---|---|---|
+| `constitution` | Long-lived principles and hard constraints | Review deeply when written |
+| `spec` | Requirements and acceptance criteria | Review every time |
+| `plan` | Implementation design and execution approach | Spot-check against the constitution |
+| `tasks` | Disposable execution checklists | No formal review |
+| `adr` | Architecture decisions, reasons, and tradeoffs | Review every time |
+| `glossary` | Shared project terminology | Review new entries |
 
-```bash
-docky hooks install          # writes ./.claude/settings.json (project-level)
-docky hooks install --user   # or ~/.claude/settings.json (global)
-```
+Each type has a built-in scaffold. To override one, create `templates/<type>.md` inside the vault. Docky never writes that directory itself.
 
-It installs two idempotent hooks:
+## Workspaces
 
-- **`SessionStart → docky hooks context`** — injects the "process docs live in docky" policy, the doc-type/review-policy table, and the current project's existing doc list, so the agent reads from the vault from the start.
-- **`PreToolUse (Edit|Write) → docky hooks guard`** — blocks an agent from writing a process `.md` into the repo and redirects it to `write_doc`; standard repo docs (README/CHANGELOG/…) and vault writes are allowed.
-
-> Hooks can only block/allow/inject — they can't force a tool call. "Read from the vault first" is driven by the injected context + your `CLAUDE.md`; the write side is enforced by the `PreToolUse` guard.
-
-## Uninstall
-
-`docky uninstall` reverses `setup` — it strips docky's hooks back out of Claude Code and prints the steps it can't do for you:
+Named workspaces isolate vaults for different contexts:
 
 ```bash
-docky uninstall              # remove hooks from ./.claude and ~/.claude, keep the vault
-docky hooks uninstall        # just the project-level hooks (mirror of `hooks install`)
-docky uninstall --purge-vault --yes   # ALSO delete the vault and every doc in it (irreversible)
+docky workspace add personal ~/docky-personal
+docky workspace add work ~/docky-work
+docky workspace list
+docky workspace use work
 ```
 
-Hook removal is surgical: only docky's own entries are pulled, unrelated hooks in the same `settings.json` are left untouched. **Your vault is never deleted implicitly** — `--purge-vault` requires an explicit `--yes`. docky can't run these for you, so `uninstall` prints them: `claude mcp remove docky` and `npm rm -g docky`.
+Run one command against another workspace without changing the default:
 
-## Cloud Sync setup wizard
+```bash
+docky --workspace personal list
+```
 
-Run the interactive wizard to configure one workspace without memorizing the individual cloud commands:
+The registry lives at `~/.docky/workspaces.yaml` and remains device-local. An MCP server captures its active workspace at startup, so restart the client after switching the default.
+
+## Cloud Storage & Sync
+
+Run the guided setup:
 
 ```bash
 docky cloud setup
-# or configure a specific workspace directly
+```
+
+Or configure a specific workspace:
+
+```bash
 docky --workspace work cloud setup
 ```
 
-The wizard walks through workspace selection, vault initialization when needed, Git remote URL, branch, the Cloud Sync switch, a review screen, and an optional first sync. Existing values are offered as defaults when the wizard is run again. HTTPS credentials embedded in a remote URL are redacted from the review screen; Git or SSH remains responsible for authentication.
+The wizard guides you through workspace selection, Vault initialization, Git Remote, branch, the Cloud Sync switch, configuration review, and an optional first sync.
 
-The non-interactive commands remain available for scripts:
+For scripts and automation:
 
 ```bash
-docky cloud connect git@github.com:you/docky-docs.git --branch main
+docky cloud connect git@github.com:you/docky-vault.git --branch main
 docky cloud on
 docky sync
 ```
 
-## Concepts
+The synchronization pipeline is intentionally conservative:
 
-- **Vault** — an independent git repo (default `~/docky-vault`, override with `$DOCKY_VAULT`), laid out as `projects/<name>/branches/<branch>/<type>/`.
-- **Workspace** — a named vault registered in `~/.docky/workspaces.yaml`; each workspace keeps its own projects, history, remote, and Cloud Sync switch.
-- **Cloud Sync** — a local-first Git synchronization state machine. Turning it off performs no remote operations and never removes local or cloud data.
-- **Scope isolation** — the core guarantee. All file operations are confined to a single project directory; escaping paths are rejected (`safePath`).
-- **Auto-commit** — writes and deletes are committed to the vault automatically, so history is always recoverable from git.
-- **Branch scope** — always enabled. Registration creates the current branch; later branches are created lazily on first write. Slash-separated refs remain readable directory trees (`feat/login`). Run `docky migrate-branch-scope` once to move legacy flat docs.
-- **Git decoupling** — docs live only in the vault; your repos stay clean.
+```text
+local write → local commit → fetch → rebase → push
+```
+
+- Local changes are committed before network access.
+- Network failures preserve the local commit for a later retry.
+- Rebase conflicts are recorded, then aborted so the local document remains intact.
+- `docky cloud off` prevents the Cloud Sync engine from contacting the remote.
+- `docky cloud status` reads local state and never contacts the remote.
+- `docky sync --all` syncs every initialized workspace with Cloud Sync enabled.
+
+Automatic synchronization currently runs when the MCP server starts and after a successful MCP document write. Changes made through the CLI or directly in the Vault are uploaded on the next `docky sync`.
+
+The legacy `docky sync --push` option can still push a separately configured Git upstream while Cloud Sync is off.
+
+## Claude Code hooks
+
+Docky can make process-document handling the default behavior in Claude Code:
+
+```bash
+docky hooks install
+docky hooks install --user
+```
+
+The hooks:
+
+- inject the Docky policy, review rules, and current document list at session start;
+- stop agent-generated process Markdown from being written into the application repository;
+- leave standard repository files such as `README.md` and `CHANGELOG.md` alone.
+
+Hook installation is idempotent and preserves unrelated entries in `.claude/settings.json`.
 
 ## Command reference
 
-Run `docky --help` for the full list.
+Run `docky <command> --help` for complete options.
 
-**Setup & projects** — `setup`, `uninstall`, `init`, `workspace add/list/use`, `register`, `projects`, `whoami`
-**Create & archive** — `new <type> [name]`, `add <type> <files…>`
-**Find & read** — `list [type]`, `search <query>`, `open <rel>`
-**Lifecycle** — `status <rel> <state>`, `mv <rel> <type>`, `rm <rel>`
-**Scope & sharing** — `grant`/`revoke`/`grants`, `config`, `migrate-branch-scope`, `migrate-types`
-**Versioning & cloud** — `cloud setup`, `cloud connect/on/off/status`, `sync`, `sync --all`
-**Agent** — `hooks install` / `hooks uninstall`
+| Area | Commands |
+|---|---|
+| Setup | `setup`, `uninstall`, `init` |
+| Workspaces | `workspace add`, `workspace list`, `workspace use` |
+| Projects | `register`, `projects`, `whoami` |
+| Create and import | `new`, `add` |
+| Find and read | `list`, `search`, `open` |
+| Lifecycle | `status`, `mv`, `rm` |
+| Sharing | `grant`, `revoke`, `grants` |
+| Cloud | `cloud setup`, `cloud connect`, `cloud on`, `cloud off`, `cloud status`, `sync` |
+| Configuration | `config` |
+| Migration | `migrate-branch-scope`, `migrate-types` |
+| Agent integration | `hooks install`, `hooks uninstall` |
+
+<details>
+<summary><strong>Migration notes</strong></summary>
+
+### Older document types
+
+```bash
+docky migrate-types
+docky migrate-types --apply
+```
+
+The dry run reports moves first. Applying the migration maps `design` to `plan` and parks retired `debug`, `code-review`, and `prompts` documents under `_legacy/` without overwriting occupied destinations.
+
+### Legacy flat branch layout
+
+```bash
+docky migrate-branch-scope
+docky migrate-branch-scope --branch feat/login
+```
+
+This command applies the migration immediately and relocates legacy project documents into `projects/<name>/branches/<branch>/`.
+
+</details>
+
+## Safety model
+
+Docky treats the Vault as durable user data:
+
+- read and write paths must stay inside the resolved project scope;
+- cross-project access is denied unless an explicit read-only grant exists;
+- destructive uninstall requires both `--purge-vault` and `--yes`;
+- duplicate agent writes return a suggestion instead of silently overwriting;
+- local project paths and device preferences are excluded from cloud commits;
+- Git history remains available for recovery after ordinary writes and deletes.
 
 ## Development
 
 ```bash
 npm install
-npm run build      # tsc -> dist/
-npm test           # vitest (136 tests)
-npm run dev -- list    # run the CLI from source via tsx
-npm run mcp            # run the MCP server from source via tsx
+npm run build
+npm test
 ```
+
+Useful development commands:
+
+```bash
+npm run dev -- list
+npm run mcp
+```
+
+The test suite uses [Vitest](https://vitest.dev/) and currently contains 140 tests. Cloud Sync integration tests create temporary local and bare Git repositories to exercise real commit, fetch, rebase, and push behavior.
+
+## Contributing
+
+Contributions are welcome. A focused pull request is the easiest to review:
+
+1. Fork the repository and create a feature branch.
+2. Install dependencies with `npm install`.
+3. Make the change and add meaningful tests where behavior changes.
+4. Run `npm run build` and `npm test`.
+5. Open a pull request describing the problem, behavior change, and verification.
+
+Use [GitHub Issues](https://github.com/Alwaysdebugg/docky/issues) for bugs and feature proposals. Please search existing issues before opening a new one.
+
+## Security
+
+Please do not publish suspected vulnerabilities in a public issue. Report them through [GitHub private vulnerability reporting](https://github.com/Alwaysdebugg/docky/security/advisories/new).
+
+## Project status
+
+Docky is at **v0.1.0** and under active development. The storage format is plain Markdown and Git so your documents remain portable while the interfaces evolve.
 
 ## License
 
-MIT.
+Docky is available under the [MIT License](LICENSE).
+
+<div align="center">
+
+Built for developers who want AI-generated project memory to stay useful.
+
+</div>
